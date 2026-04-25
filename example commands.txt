@@ -1,0 +1,154 @@
+❯ ssh crestron@mc4
+The authenticity of host 'mc4 (172.16.100.193)' can't be established.
+ECDSA key fingerprint is: SHA256:2167LZp6AjCAcLWKEPyQuTwi82Xso1PDlcGqWcQp3+I
+This key is not known by any other names.
+Are you sure you want to continue connecting (yes/no/[fingerprint])? yes
+Warning: Permanently added 'mc4' (ECDSA) to the list of known hosts.
+Device is in first boot mode.  Please enter the default user name and password.  You will then be prompted to create a new user.
+crestron@mc4's password:
+Please create a local administrator account.
+Username: mike
+
+Password: **********
+
+Verify password: **********
+An administrator account was successfully created.
+AUTHENTICATION is now ON.
+
+MC4>Connection to mc4 closed.
+
+❯ ssh mike@mc4
+mike@mc4's password:
+
+MC4 Control Console
+
+MC4>
+
+
+❯ ssh mike@mc4
+mike@mc4's password:
+
+MC4 Control Console
+
+MC4>
+ Current Time/Date: 17:55:38 04-25-2026
+
+MC4>
+
+MC4>time
+ Current Time/Date: 17:55:44 04-25-2026
+
+MC4>time ?
+TIMEdate [hh:mm:ss mm-dd-yyyy]
+        hh:mm:ss - time in hours (use 24hr), mins and secs
+        mm/dd/yyyy or mm-dd-yyyy - date in months(1-12), day(1-31) and year
+        No parameter - displays current setting
+
+MC4>sntp
+time synchronization: enabled
+server = pool.ntp.org
+
+  Auth Type: NONE
+
+
+MC4>sntp ?
+SNTP [START|STOP|SYNC|LOG|NOLOG|DELETE {SERVER|SERVER2|SERVER3}|SERVER {args}|SERVER2 {args}|SERVER3 {args}]
+        START  - start synchronization
+        STOP   - stop synchronization
+        SYNC   - force synchronization (one time)
+        LOG    - enable logging of SNTP messages to syslog
+        NOLOG  - disable logging of SNTP messages to syslog
+        DELETE {SERVER|SERVER2|SERVER3}  - delete configuration for NTP server1 or server2 or server3
+        SERVER:{address} [optional args] - address of primary NTP server with optional arguments
+        SERVER2:{address} [optional args]- address of secondary NTP server to synchronize with optional arguments
+        SERVER3:{address} [optional args]- address of secondary NTP server to synchronize with optional arguments
+          optional args:
+           PORT:{1-65535} - NTP Port (Default 123)
+           AUTH:{MAC} - Secured NTP. MAC authentication.
+           KEYTYPE:{MD5(less secured)|SHA1|SHA256} - Key Type for MAC authentication only. (Default SHA1).
+           KEY:{shared key} - Pre-Shared key between NTP client and server. (MAC authentication only).
+           KEYID:{1-65535} - Pre-Shared key index between NTP client and server. (MAC authentication only).
+           NOTE: MD5 is not allowed when FIPSMODE is on.
+           Example:
+            1. SNTP SERVER:macntp.example.com AUTH:mac KEYID:1 KEY:e5fa44f2b31c1fb553b6021e7360d07d5d91ff5e
+            2. SNTP SERVER:pool.example.com
+            3. SNTP SERVER:2001:db8:be:ef:10::20
+        No parameter - displays current setting
+
+MC4>timez ?
+TIMEZONE [LIST | zone]
+        LIST - print timezones
+        zone - number of the timezone to set
+        No parameter - displays current setting
+
+MC4>timez 33
+timezone set to GMT Standard Time
+
+MC4>webport 8080
+Web server is currently on, restarting to take effect ...
+ Stopping web server ... Done
+ Starting web server ... Done
+New Webserver port number = 8080.
+
+MC4>SECUREWEBPORT 8443
+Web server is currently on, restarting to take effect ...
+ Stopping web server ... Done
+ Starting web server ... Done
+New Secure(SSL) Webserver port number = 8443.
+
+MC4>fipsmode off
+SUCCESS: FIPS mode disabled. Reboot to take effect.
+
+MC4>bye
+Disconnecting Bye....
+Connection to mc4 closed.
+
+MC4>ADDPUBKEYTOUSER -N:mike -K:mikejobson.pub
+The key has been successfully added to the user
+
+MC4>ver -v
+MC4 Cntrl Eng [v2.8006.00284 (Mar  2 2026), %MC4X137884] @E-00107f9c9693
+Build: Mar  2 2026  (590828)
+Updater: 2.8006.00284
+Bootloader: 02.019.000
+Cab: 1.8004.0229
+Mono: 6.12.0.108
+.NET: 8.0.23
+Python: 3.8.13
+IR FPGA: Version: 15
+CCUI Version: 16.0100.1050508
+XIOSDK: 3.8.2
+IoTSDK: 1.13.0
+Build time: 18:07:10
+Product ID: 0x7D38
+Revision ID: 0x0000
+CPU ID: 0x0008
+Ethernet Phy: Rev1
+PUF: 2.8006.00284.01
+SerialNumber: MC4X137884
+ModelName: MC4
+IOPVersion: FPGA [v15] slot:6
+MC4-SetupProgram: 7.0400.0002
+BACnetVersion: 30.1.31
+SNMPVersion: SNMP_VERSION_5_9_4_1
+RFGwayVersion: ezsp version 06 stack id 02 stack version 6230
+Forced Auth Mode: True
+FIPS Mode: False
+Certificate update reboot time: Tue Jun 23 03:00:00 2026
+
+MC4>puf ?
+PUFexec path [options] [flags]
+        path: path to the .puf file; \romdisk\user\system\ is the default folder.
+        options: comma-separated list of the components to update or no option (empty) for automatic update,
+                        ALL - for all components,
+                        LIST - for the brief list of the components in the .puf,
+                        ANALYSIS - for the extended list with version analysis against the device.
+        flags: -v for verbose output, -k for saving the puf file after successful update(s).
+        Note: No parameter - search in \rm and \romdisk\user\system for a .puf file for automatic update.
+        Note: "PUF -results" displays last operation results.
+        Note: "PUF -log" displays last update's full log.
+        Note: Only the path to the .puf file is case-sensitive.
+
+MC4>reboot
+Rebooting system.  Please wait...
+Connection to mc4 closed.
