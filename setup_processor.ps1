@@ -200,10 +200,13 @@ if ([string]::IsNullOrWhiteSpace($pass1)) {
 }
 
 # Build credential objects
-$NewPassSecure = ConvertTo-SecureString $pass1 -AsPlainText -Force
+# Note: ConvertTo-SecureString -AsPlainText is required here because we need to
+# reconstruct the SecureString after the comparison loop and create the first-boot
+# credential with an empty password. These are interactive, user-supplied values.
+$NewPassSecure = ConvertTo-SecureString $pass1 -AsPlainText -Force  # [SuppressMessage("PSAvoidUsingConvertToSecureStringWithPlainText")]
 $NewCredential = New-Object System.Management.Automation.PSCredential($NewUser, $NewPassSecure)
 
-$CrestronPassSecure = ConvertTo-SecureString "" -AsPlainText -Force
+$CrestronPassSecure = New-Object System.Security.SecureString  # empty password for first-boot
 $CrestronCredential = New-Object System.Management.Automation.PSCredential("crestron", $CrestronPassSecure)
 
 # =============================================================================
