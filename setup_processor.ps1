@@ -203,7 +203,7 @@ if ([string]::IsNullOrWhiteSpace($pass1)) {
 # Note: ConvertTo-SecureString -AsPlainText is required here because we need to
 # reconstruct the SecureString after the comparison loop and create the first-boot
 # credential with an empty password. These are interactive, user-supplied values.
-$NewPassSecure = ConvertTo-SecureString $pass1 -AsPlainText -Force  # [SuppressMessage("PSAvoidUsingConvertToSecureStringWithPlainText")]
+$NewPassSecure = ConvertTo-SecureString $pass1 -AsPlainText -Force
 $NewCredential = New-Object System.Management.Automation.PSCredential($NewUser, $NewPassSecure)
 
 $CrestronPassSecure = New-Object System.Security.SecureString  # empty password for first-boot
@@ -517,14 +517,16 @@ Write-Status -Tag "OK" -Message "Reboot command sent."
 # Wait for the processor to come back up
 $RebootTimeout = 300  # 5 minutes
 $PollInterval  = 5
-$Elapsed = 0
 
 Write-Host "Waiting for processor to go offline..."
 Start-Sleep -Seconds 10
 
 Write-Host "Polling $HostName until it responds (timeout: ${RebootTimeout}s)..."
 
-while ($Elapsed -lt $RebootTimeout) {
+$stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+while ($stopwatch.Elapsed.TotalSeconds -lt $RebootTimeout) {
+    $Elapsed = [int]$stopwatch.Elapsed.TotalSeconds
     $pingOk = Test-Connection -ComputerName $HostName -Count 1 -Quiet -TimeoutSeconds 2 -ErrorAction SilentlyContinue
 
     if ($pingOk) {
@@ -542,6 +544,7 @@ while ($Elapsed -lt $RebootTimeout) {
                 Send-SSHCommand -Stream $checkStream -Command "BYE" | Out-Null
                 Remove-SSHSession -SessionId $checkSession.SessionId -ErrorAction SilentlyContinue | Out-Null
                 Write-Status -Tag "OK" -Message "Processor is back online."
+                $stopwatch.Stop()
                 break
             }
 
@@ -552,13 +555,14 @@ while ($Elapsed -lt $RebootTimeout) {
             Write-Host "  Ping OK but SSH not ready yet, retrying..."
         }
     } else {
-        Write-Host "  Waiting... ${Elapsed}s elapsed" -NoNewline
-        Write-Host "`r" -NoNewline
+        $padding = " " * 20
+        Write-Host "`r  Waiting... ${Elapsed}s elapsed${padding}" -NoNewline
     }
 
     Start-Sleep -Seconds $PollInterval
-    $Elapsed += $PollInterval + 2
 }
+
+$Elapsed = [int]$stopwatch.Elapsed.TotalSeconds
 
 Write-Host ""
 
