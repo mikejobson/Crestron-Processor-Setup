@@ -159,12 +159,16 @@ if (-not (Get-Module -ListAvailable -Name Posh-SSH)) {
 
 Import-Module Posh-SSH -ErrorAction Stop
 
-# Validate public key file
+# Check for public key file
+$SkipPubKey = $false
 if (-not (Test-Path $PubKeyFile)) {
-    Write-Host "ERROR: Public key file not found: $PubKeyFile" -ForegroundColor Red
-    exit 1
+    Write-Status -Tag "WARN" -Message "Public key file not found: $PubKeyFile"
+    Write-Host "       Skipping public key upload and registration."
+    $SkipPubKey = $true
+    $PubKeyBasename = ""
+} else {
+    $PubKeyBasename = Split-Path $PubKeyFile -Leaf
 }
-$PubKeyBasename = Split-Path $PubKeyFile -Leaf
 
 # =============================================================================
 # Prompt for new admin credentials
@@ -298,24 +302,29 @@ Start-Sleep -Seconds 2
 # Phase 2: Upload Public Key via SFTP
 # =============================================================================
 Write-Phase "Phase 2: Upload Public Key"
-Write-Host "Uploading '$PubKeyBasename' to /user/ on $HostName..."
 
-try {
-    $sftpSession = New-SFTPSession -ComputerName $HostName -Credential $NewCredential `
-        -AcceptKey -ConnectionTimeout 10 -ErrorAction Stop
+if ($SkipPubKey) {
+    Write-Status -Tag "SKIP" -Message "No public key file - skipping upload."
+} else {
+    Write-Host "Uploading '$PubKeyBasename' to /user/ on $HostName..."
 
-    Set-SFTPItem -SessionId $sftpSession.SessionId -Path $PubKeyFile `
-        -Destination "/user/" -Force -ErrorAction Stop
+    try {
+        $sftpSession = New-SFTPSession -ComputerName $HostName -Credential $NewCredential `
+            -AcceptKey -ConnectionTimeout 10 -ErrorAction Stop
 
-    Remove-SFTPSession -SessionId $sftpSession.SessionId -ErrorAction SilentlyContinue | Out-Null
+        Set-SFTPItem -SessionId $sftpSession.SessionId -Path $PubKeyFile `
+            -Destination "/user/" -Force -ErrorAction Stop
 
-    Write-Host ""
-    Write-Status -Tag "OK" -Message "Public key uploaded."
+        Remove-SFTPSession -SessionId $sftpSession.SessionId -ErrorAction SilentlyContinue | Out-Null
 
-} catch {
-    Write-Status -Tag "FAIL" -Message "Failed to upload public key via SFTP."
-    Write-Host "       Error: $($_.Exception.Message)" -ForegroundColor Red
-    exit 1
+        Write-Host ""
+        Write-Status -Tag "OK" -Message "Public key uploaded."
+
+    } catch {
+        Write-Status -Tag "FAIL" -Message "Failed to upload public key via SFTP."
+        Write-Host "       Error: $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
 }
 
 # =============================================================================
@@ -344,9 +353,18 @@ try {
         Write-Step "Connected to $ModelName"
     }
 
+    # Register the public key only if we have one
+    if (-not $SkipPubKey) {
+        Write-Step "Register Public Key"
+        $response = Send-SSHCommand -Stream $stream -Command "ADDPUBKEYTOUSER -N:$NewUser -K:$PubKeyBasename"
+        Write-Host $response
+    } else {
+        Write-Step "Register Public Key"
+        Write-Status -Tag "SKIP" -Message "No public key file - skipping registration."
+    }
+
     # Send configuration commands
     $commands = @(
-        @{ Cmd = "ADDPUBKEYTOUSER -N:$NewUser -K:$PubKeyBasename";  Label = "Register Public Key" }
         @{ Cmd = "TIMEZONE $Timezone";                                Label = "Set Timezone" }
         @{ Cmd = "TIMEDATE $CurrentTime $CurrentDate";               Label = "Set Date/Time" }
         @{ Cmd = "SNTP SERVER:$NtpServer";                           Label = "Configure NTP Server" }
@@ -579,6 +597,11 @@ Write-Host "==========================================" -ForegroundColor Green
 Write-Host "  Setup complete for $ModelName @ $HostName" -ForegroundColor Green
 Write-Host "==========================================" -ForegroundColor Green
 Write-Host "  Account:      $NewUser"
+if ($SkipPubKey) {
+    Write-Host "  Public Key:   Skipped (not found)"
+} else {
+    Write-Host "  Public Key:   $PubKeyBasename"
+}
 Write-Host "  Timezone:     $Timezone"
 Write-Host "  NTP Server:   $NtpServer"
 Write-Host "  Web Port:     8080"

@@ -54,12 +54,16 @@ fi
 
 HOST="$1"
 
-# ---- Validate public key file exists ----------------------------------------
+# ---- Check for public key file ----------------------------------------------
+SKIP_PUBKEY=false
 if [[ ! -f "$PUBKEY_FILE" ]]; then
-    echo "ERROR: Public key file not found: $PUBKEY_FILE" >&2
-    exit 1
+    echo "[WARN] Public key file not found: $PUBKEY_FILE"
+    echo "       Skipping public key upload and registration."
+    SKIP_PUBKEY=true
+    PUBKEY_BASENAME=""
+else
+    PUBKEY_BASENAME="$(basename "$PUBKEY_FILE")"
 fi
-PUBKEY_BASENAME="$(basename "$PUBKEY_FILE")"
 
 # ---- Prompt for new admin credentials ---------------------------------------
 read -rp "New admin username: " NEW_USER
@@ -224,6 +228,10 @@ sleep 2
 # =============================================================================
 echo ""
 echo "==== Phase 2: Upload Public Key ===="
+
+if [[ "$SKIP_PUBKEY" == true ]]; then
+    echo "[SKIP] No public key file — skipping upload."
+else
 echo "Uploading '$PUBKEY_BASENAME' to /user/ on $HOST..."
 
 SFTP_RESULT=$(expect -c "
@@ -278,6 +286,7 @@ SFTP_RESULT=$(expect -c "
 echo "$SFTP_RESULT" | grep -v '^spawn ' | grep -v '^$'
 echo ""
 echo "[OK] Public key uploaded."
+fi
 
 # =============================================================================
 # Phase 3: Configuration
@@ -326,7 +335,15 @@ CONFIG_OUTPUT=$(expect -c "
         }
     }
 
-    send_cmd \"ADDPUBKEYTOUSER -N:$NEW_USER -K:$PUBKEY_BASENAME\" \"Register Public Key\"
+    # Register the public key only if we have one
+    set skip_pubkey $SKIP_PUBKEY
+    if {\$skip_pubkey ne \"true\"} {
+        send_cmd \"ADDPUBKEYTOUSER -N:$NEW_USER -K:$PUBKEY_BASENAME\" \"Register Public Key\"
+    } else {
+        puts \"\r\n--- Register Public Key ---\"
+        puts \"SKIPPED (no public key file)\"
+    }
+
     send_cmd \"TIMEZONE $TIMEZONE\" \"Set Timezone\"
     send_cmd \"TIMEDATE $CURRENT_TIME $CURRENT_DATE\" \"Set Date/Time\"
     send_cmd \"SNTP SERVER:$NTP_SERVER\" \"Configure NTP Server\"
@@ -647,6 +664,11 @@ echo "=========================================="
 echo "  Setup complete for $MODEL_NAME @ $HOST"
 echo "=========================================="
 echo "  Account:      $NEW_USER"
+if [[ "$SKIP_PUBKEY" == true ]]; then
+    echo "  Public Key:   Skipped (not found)"
+else
+    echo "  Public Key:   $PUBKEY_BASENAME"
+fi
 echo "  Timezone:     $TIMEZONE"
 echo "  NTP Server:   $NTP_SERVER"
 echo "  Web Port:     8080"
