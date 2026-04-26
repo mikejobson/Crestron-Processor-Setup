@@ -12,6 +12,8 @@ FIRMWARE_DIR="$HOME/Sync/Crestron Firmware"
 PUBKEY_FILE="$HOME/.ssh/id_rsa.pub"
 TIMEZONE="33"          # 33 = GMT Standard Time (use TIMEZONE LIST on processor to see options)
 NTP_SERVER="pool.ntp.org"
+WEB_PORT="8080"
+SECURE_WEB_PORT="8443"
 
 # ---- SSH options used throughout --------------------------------------------
 SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o PubkeyAuthentication=no"
@@ -348,8 +350,8 @@ CONFIG_OUTPUT=$(expect -c "
     send_cmd \"TIMEDATE $CURRENT_TIME $CURRENT_DATE\" \"Set Date/Time\"
     send_cmd \"SNTP SERVER:$NTP_SERVER\" \"Configure NTP Server\"
     send_cmd \"SNTP SYNC\" \"Force NTP Sync\"
-    send_cmd \"WEBPORT 8080\" \"Set Web Port\"
-    send_cmd \"SECUREWEBPORT 8443\" \"Set Secure Web Port\"
+    send_cmd \"WEBPORT $WEB_PORT\" \"Set Web Port\"
+    send_cmd \"SECUREWEBPORT $SECURE_WEB_PORT\" \"Set Secure Web Port\"
     send_cmd \"SETUSERLOGINATTEMPTS 5\" \"Set User Login Attempts\"
     send_cmd \"SETUSERLOCKOUTTIME 1m\" \"Set User Lockout Time\"
     send_cmd \"SETLOGINATTEMPTS 20\" \"Set Login Attempts\"
@@ -671,8 +673,8 @@ else
 fi
 echo "  Timezone:     $TIMEZONE"
 echo "  NTP Server:   $NTP_SERVER"
-echo "  Web Port:     8080"
-echo "  Secure Port:  8443"
+echo "  Web Port:     $WEB_PORT"
+echo "  Secure Port:  $SECURE_WEB_PORT"
 echo "  FIPS Mode:    OFF"
 if [[ "$SKIP_FIRMWARE" == true ]]; then
     echo "  Firmware:     Already up to date (${CURRENT_PUF_VERSION:-unknown})"

@@ -38,6 +38,8 @@ $FirmwareDir = Join-Path $env:USERPROFILE "Sync\Crestron Firmware"
 $PubKeyFile  = Join-Path $env:USERPROFILE ".ssh\id_rsa.pub"
 $Timezone    = "33"           # 33 = GMT Standard Time (use TIMEZONE LIST on processor)
 $NtpServer   = "pool.ntp.org"
+$WebPort     = "8080"
+$SecureWebPort = "8443"
 
 # =============================================================================
 # Helper functions
@@ -369,8 +371,8 @@ try {
         @{ Cmd = "TIMEDATE $CurrentTime $CurrentDate";               Label = "Set Date/Time" }
         @{ Cmd = "SNTP SERVER:$NtpServer";                           Label = "Configure NTP Server" }
         @{ Cmd = "SNTP SYNC";                                        Label = "Force NTP Sync" }
-        @{ Cmd = "WEBPORT 8080";                                     Label = "Set Web Port" }
-        @{ Cmd = "SECUREWEBPORT 8443";                               Label = "Set Secure Web Port" }
+        @{ Cmd = "WEBPORT $WebPort";                                  Label = "Set Web Port" }
+        @{ Cmd = "SECUREWEBPORT $SecureWebPort";                     Label = "Set Secure Web Port" }
         @{ Cmd = "SETUSERLOGINATTEMPTS 5";                           Label = "Set User Login Attempts" }
         @{ Cmd = "SETUSERLOCKOUTTIME 1m";                            Label = "Set User Lockout Time" }
         @{ Cmd = "SETLOGINATTEMPTS 20";                              Label = "Set Login Attempts" }
@@ -604,8 +606,8 @@ if ($SkipPubKey) {
 }
 Write-Host "  Timezone:     $Timezone"
 Write-Host "  NTP Server:   $NtpServer"
-Write-Host "  Web Port:     8080"
-Write-Host "  Secure Port:  8443"
+Write-Host "  Web Port:     $WebPort"
+Write-Host "  Secure Port:  $SecureWebPort"
 Write-Host "  FIPS Mode:    OFF"
 if ($SkipFirmware) {
     Write-Host "  Firmware:     Already up to date ($(if ($CurrentPufVersion) { $CurrentPufVersion } else { 'unknown' }))"
