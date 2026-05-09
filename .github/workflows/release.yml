@@ -179,15 +179,3 @@ jobs:
           git diff --cached --quiet && exit 0
           git commit -m "Update crestron-setup to ${GITHUB_REF_NAME#v}"
           git push
-
-  # ── Submit to Windows Package Manager ────────────────────────────────
-  bump-winget:
-    name: Update Winget manifest
-    needs: github-release
-    runs-on: windows-latest
-    steps:
-      - uses: vedantmgoyal9/winget-releaser@v2
-        with:
-          identifier: mikejobson.CrestronSetup
-          installers-regex: crestron-setup-windows\.exe$
-          token: ${{ secrets.WINGET_TOKEN }}
