@@ -123,3 +123,71 @@ jobs:
           download-url: https://github.com/mikejobson/Crestron-Processor-Setup/releases/download/${{ github.ref_name }}/crestron-setup-macos
         env:
           COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+  # ── Update Scoop bucket ──────────────────────────────────────────────
+  bump-scoop:
+    name: Update Scoop bucket
+    needs: github-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: crestron-setup-windows
+          path: artifacts/
+
+      - name: Calculate SHA256
+        id: hash
+        run: echo "sha256=$(sha256sum artifacts/crestron-setup.exe | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: mikejobson/scoop
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: scoop-bucket
+
+      - name: Update manifest
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          HASH="${{ steps.hash.outputs.sha256 }}"
+          URL="https://github.com/mikejobson/Crestron-Processor-Setup/releases/download/${TAG}/crestron-setup-windows.exe"
+          jq -n \
+            --arg v "$VERSION" \
+            --arg url "$URL" \
+            --arg hash "$HASH" \
+            '{
+              version: $v,
+              description: "Cross-platform Crestron processor provisioning console",
+              homepage: "https://github.com/mikejobson/Crestron-Processor-Setup",
+              license: "MIT",
+              url: $url,
+              hash: $hash,
+              bin: [["crestron-setup-windows.exe", "crestron-setup"]],
+              checkver: "github",
+              autoupdate: {
+                url: "https://github.com/mikejobson/Crestron-Processor-Setup/releases/download/v$version/crestron-setup-windows.exe"
+              }
+            }' > scoop-bucket/bucket/crestron-setup.json
+
+      - name: Commit and push
+        working-directory: scoop-bucket
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add bucket/crestron-setup.json
+          git diff --cached --quiet && exit 0
+          git commit -m "Update crestron-setup to ${GITHUB_REF_NAME#v}"
+          git push
+
+  # ── Submit to Windows Package Manager ────────────────────────────────
+  bump-winget:
+    name: Update Winget manifest
+    needs: github-release
+    runs-on: windows-latest
+    steps:
+      - uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: mikejobson.CrestronSetup
+          installers-regex: crestron-setup-windows\.exe$
+          token: ${{ secrets.WINGET_TOKEN }}

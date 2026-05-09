@@ -50,8 +50,14 @@ sudo mv crestron-setup-macos /usr/local/bin/crestron-setup
 ### Scoop (Windows)
 
 ```powershell
-scoop bucket add crestron https://github.com/mikejobson/scoop-crestron
+scoop bucket add crestron https://github.com/mikejobson/scoop
 scoop install crestron-setup
+```
+
+### Winget (Windows)
+
+```powershell
+winget install mikejobson.CrestronSetup
 ```
 
 ### From Source
