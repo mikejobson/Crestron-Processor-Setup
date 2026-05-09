@@ -93,7 +93,7 @@ Copy `config.example.yaml` to get started. Key settings:
 | ----------------- | -------------------------- | ----------------------------------- |
 | `timezone`        | `33` (GMT Standard Time)   | Crestron timezone ID                |
 | `ntp_server`      | `pool.ntp.org`             | NTP server address                  |
-| `pubkey_file`     | `~/.ssh/id_rsa.pub`        | SSH public key to upload            |
+| `pubkey_file`     | `~/.ssh/id_rsa.pub`        | SSH public key — local path or URL (e.g. `https://github.com/user.keys`) |
 | `firmware_dir`    | `~/Sync/Crestron Firmware` | Local firmware directory (fallback) |
 | `web_port`        | `8080`                     | Web server port                     |
 | `secure_web_port` | `8443`                     | Secure web server port              |

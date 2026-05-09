@@ -9,10 +9,12 @@ import platform
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from rich.console import Console
 from rich.live import Live
@@ -34,6 +36,39 @@ PHASE_NAMES = [
     "Reboot",
     "Firmware Upload",
 ]
+
+
+def _resolve_pubkey(pubkey_file: str) -> Path | None:
+    """Resolve a pubkey source (local path or URL) to a local file path.
+
+    If pubkey_file looks like a URL (http/https), downloads the content to a
+    temp file and returns that path. Otherwise treats it as a local path.
+    Returns None if the key cannot be resolved.
+    """
+    parsed = urlparse(pubkey_file)
+    if parsed.scheme in ("http", "https"):
+        try:
+            import httpx
+
+            resp = httpx.get(pubkey_file, timeout=15, follow_redirects=True)
+            resp.raise_for_status()
+            content = resp.text.strip()
+            if not content:
+                return None
+            # Use first key line if multiple are returned (e.g. GitHub .keys)
+            first_key = content.splitlines()[0]
+            # Write to a named temp file that persists for the session
+            tmp = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".pub", prefix="crestron_key_", delete=False
+            )
+            tmp.write(first_key + "\n")
+            tmp.close()
+            return Path(tmp.name)
+        except Exception:
+            return None
+    else:
+        path = Path(pubkey_file).expanduser()
+        return path if path.exists() else None
 
 
 @contextmanager
@@ -175,7 +210,38 @@ def _run_provisioning(
     """Execute all phases inside a Live display. Returns True on success."""
     model_name = ""
     current_puf_version = ""
-    pubkey_path = Path(config.pubkey_file).expanduser()
+    pubkey_path = _resolve_pubkey(config.pubkey_file)
+    # Track whether we downloaded the key (needs cleanup)
+    _is_temp_key = pubkey_path is not None and str(pubkey_path).startswith(
+        tempfile.gettempdir()
+    )
+
+    try:
+        return _run_provisioning_inner(
+            host, device, username, password, config, console,
+            tracker, results, skip_firmware, skip_reboot, pubkey_path,
+        )
+    finally:
+        if _is_temp_key and pubkey_path and pubkey_path.exists():
+            pubkey_path.unlink()
+
+
+def _run_provisioning_inner(
+    host: str,
+    device: Device,
+    username: str,
+    password: str,
+    config: Config,
+    console: Console,
+    tracker: _StepTracker,
+    results: dict[str, str],
+    skip_firmware: bool,
+    skip_reboot: bool,
+    pubkey_path: Path | None,
+) -> bool:
+    """Execute all phases inside a Live display. Returns True on success."""
+    model_name = ""
+    current_puf_version = ""
 
     with Live(tracker, console=console, refresh_per_second=10) as live:
 
@@ -209,8 +275,8 @@ def _run_provisioning(
         tracker.start(1, "Uploading…")
         live.update(tracker)
 
-        if not pubkey_path.exists():
-            tracker.skip(1, f"Key not found: {pubkey_path.name}")
+        if not pubkey_path:
+            tracker.skip(1, "Key not found")
         else:
             if sftp_upload(host, username, password, str(pubkey_path), "/user"):
                 tracker.ok(1, pubkey_path.name)
@@ -230,7 +296,7 @@ def _run_provisioning(
         current_date = now.strftime("%m-%d-%Y")
 
         commands: list[tuple[str, str]] = []
-        pubkey_basename = pubkey_path.name if pubkey_path.exists() else ""
+        pubkey_basename = pubkey_path.name if pubkey_path else ""
         if pubkey_basename:
             commands.append((
                 f"ADDPUBKEYTOUSER -N:{username} -K:{pubkey_basename}",

@@ -8,7 +8,10 @@ timezone: "33" # 33 = GMT Standard Time
 # NTP server for time synchronisation
 ntp_server: "pool.ntp.org"
 
-# SSH public key file to upload to processors
+# SSH public key file to upload to processors (local path or URL)
+# Examples:
+#   pubkey_file: "~/.ssh/id_rsa.pub"
+#   pubkey_file: "https://github.com/username.keys"
 pubkey_file: "~/.ssh/id_rsa.pub"
 
 # Local directory to search for .puf firmware files (fallback if no download URL)
