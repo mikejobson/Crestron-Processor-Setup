@@ -448,8 +448,12 @@ def _prompt_network_config(device_label: str = "") -> NetworkConfig | None:
     if mode is None or mode == "skip":
         return None
 
+    new_hostname = questionary.text(
+        f"{prefix}Hostname (blank to skip):", default=""
+    ).ask()
+
     if mode == "dhcp":
-        return NetworkConfig(mode="dhcp")
+        return NetworkConfig(mode="dhcp", hostname=new_hostname or "")
 
     ip = questionary.text(f"{prefix}IP address:").ask()
     if not ip:
@@ -474,6 +478,7 @@ def _prompt_network_config(device_label: str = "") -> NetworkConfig | None:
 
     return NetworkConfig(
         mode="static",
+        hostname=new_hostname or "",
         ip_address=ip,
         subnet_mask=mask,
         gateway=gw,

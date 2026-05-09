@@ -10,6 +10,7 @@ class NetworkConfig:
     """IP configuration for a device's primary NIC."""
 
     mode: str = "dhcp"  # "dhcp" or "static"
+    hostname: str = ""
     ip_address: str = ""
     subnet_mask: str = "255.255.255.0"
     gateway: str = ""

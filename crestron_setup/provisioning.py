@@ -295,13 +295,18 @@ def _run_provisioning(
             live.update(tracker)
             try:
                 with CrestronSSH(host, username, password) as ssh:
+                    if net.hostname:
+                        ssh.send_command(f"HOSTNAME {net.hostname}")
                     ssh.send_command("DHCP 0 ON /now")
                     # Confirm via IPCONFIG
                     tracker.details[3] = "Verifying…"
                     live.update(tracker)
                     ip_output = ssh.send_command("IPCONFIG /ALL", timeout=10)
                     results["ip_config"] = ip_output
-                tracker.ok(3, "DHCP enabled")
+                detail = "DHCP enabled"
+                if net.hostname:
+                    detail += f" — hostname: {net.hostname}"
+                tracker.ok(3, detail)
             except Exception as e:
                 tracker.fail(3, str(e))
                 live.update(tracker)
@@ -315,7 +320,10 @@ def _run_provisioning(
                 with CrestronSSH(host, username, password) as ssh:
                     # Set IP details first (without /now), then disable DHCP
                     # last with /now so all changes activate together.
-                    net_cmds = [
+                    net_cmds = []
+                    if net.hostname:
+                        net_cmds.append((f"HOSTNAME {net.hostname}", f"Hostname → {net.hostname}"))
+                    net_cmds += [
                         (f"IPADDRESS 0 {net.ip_address}", f"IP → {net.ip_address}"),
                         (f"IPMASK 0 {net.subnet_mask}", f"Mask → {net.subnet_mask}"),
                         (f"DEFROUTER 0 {net.gateway}", f"Gateway → {net.gateway}"),
