@@ -44,5 +44,5 @@ Issues = "https://github.com/mikejobson/Crestron-Processor-Setup/issues"
 [tool.setuptools.packages.find]
 include = ["crestron_setup*"]
 
-[tool.setuptools-scm]
+[tool.setuptools_scm]
 write_to = "crestron_setup/_version.py"
