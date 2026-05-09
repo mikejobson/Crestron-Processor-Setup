@@ -14,7 +14,7 @@ from .config import load_config, save_config
 from .discovery import discover_devices, print_device_table
 from .firmware import download_firmware, find_local_firmware
 from .models import Config, Device, NetworkConfig
-from .provisioning import provision_device, restore_device
+from .provisioning import provision_device, restore_device, upload_program
 from .ssh import CrestronFirstBoot
 from .timezones import timezone_choices, timezone_label
 from . import __version__
@@ -68,6 +68,7 @@ def main() -> None:
             choices=[
                 questionary.Choice("Discover Devices", value="discover"),
                 questionary.Choice("Setup Device (manual IP)", value="setup"),
+                questionary.Choice("Upload Program", value="program"),
                 questionary.Choice("Restore & Erase Device", value="restore"),
                 questionary.Choice("Download Firmware", value="firmware"),
                 questionary.Choice("Settings", value="settings"),
@@ -83,6 +84,8 @@ def main() -> None:
             _flow_discover(config)
         elif choice == "setup":
             _flow_manual_setup(config)
+        elif choice == "program":
+            config = _flow_upload_program(config)
         elif choice == "restore":
             _flow_restore()
         elif choice == "firmware":
@@ -202,6 +205,56 @@ def _flow_manual_setup(config: Config) -> None:
 
     provision_device(device, username, password, config, console)
     _pause()
+
+
+# --------------------------------------------------------------------------- #
+#  Upload Program flow
+# --------------------------------------------------------------------------- #
+
+
+def _flow_upload_program(config: Config) -> Config:
+    """Upload a program file to a processor and load it."""
+    _header("Upload Program")
+
+    host = questionary.text("Processor hostname or IP:").ask()
+    if not host:
+        return config
+
+    username = questionary.text("Admin username:").ask()
+    if not username:
+        return config
+
+    password = questionary.password("Admin password:").ask()
+    if not password:
+        return config
+
+    default_path = config.last_program_file or ""
+    program_path = questionary.path(
+        "Program file path:",
+        default=default_path,
+    ).ask()
+    if not program_path:
+        return config
+
+    slot_input = questionary.text("Program slot:", default="1").ask()
+    if not slot_input:
+        return config
+    try:
+        slot = int(slot_input)
+        if slot < 1:
+            raise ValueError
+    except ValueError:
+        console.print("[red]Invalid slot number.[/red]")
+        _pause()
+        return config
+
+    # Remember the program file for next time
+    config.last_program_file = program_path
+    save_config(config)
+
+    upload_program(host, username, password, program_path, slot, console)
+    _pause()
+    return config
 
 
 # --------------------------------------------------------------------------- #

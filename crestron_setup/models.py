@@ -60,6 +60,7 @@ class Config:
     login_attempts: int = 20
     lockout_time: str = "5m"
     fips_mode: str = "OFF"
+    last_program_file: str = ""
     firmware_urls: dict[str, FirmwareSource] = field(default_factory=dict)
     discovery_timeout: int = 5
     discovery_broadcast_count: int = 3

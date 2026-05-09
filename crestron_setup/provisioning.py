@@ -823,3 +823,72 @@ def _ping(host: str) -> bool:
         return result.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
+
+
+# --------------------------------------------------------------------------- #
+#  Program Upload
+# --------------------------------------------------------------------------- #
+
+PROGRAM_PHASE_NAMES = [
+    "Upload Program",
+    "Load Program",
+]
+
+
+def upload_program(
+    host: str,
+    username: str,
+    password: str,
+    program_path: str,
+    slot: int,
+    console: Console,
+) -> bool:
+    """Upload a program file to a processor and load it.
+
+    1. SFTP the file to /programXX/
+    2. Run PROGLOAD -P:XX to load it
+
+    Returns True on success.
+    """
+    tracker = _StepTracker(host, list(PROGRAM_PHASE_NAMES))
+    tracker._panel_title = f"Program Upload — {host}"
+
+    slot_str = f"{slot:02d}"
+    remote_dir = f"/program{slot_str}"
+    local = Path(program_path).expanduser()
+
+    with Live(tracker, console=console, refresh_per_second=10) as live:
+        # ── Phase 1: Upload ────────────────────────────────────────────
+        tracker.start(0, f"Uploading {local.name}…")
+        live.update(tracker)
+
+        if not local.exists():
+            tracker.fail(0, f"File not found: {local}")
+            live.update(tracker)
+            return False
+
+        if sftp_upload(host, username, password, str(local), remote_dir):
+            tracker.ok(0, f"{local.name} → {remote_dir}/")
+        else:
+            tracker.fail(0, "Upload failed")
+            live.update(tracker)
+            return False
+        live.update(tracker)
+
+        # ── Phase 2: Load ──────────────────────────────────────────────
+        tracker.start(1, f"Loading program in slot {slot_str}…")
+        live.update(tracker)
+
+        try:
+            with CrestronSSH(host, username, password) as ssh:
+                output = ssh.send_command(f"PROGLOAD -P:{slot_str}", timeout=30)
+                tracker.ok(1, f"Slot {slot_str} loaded")
+        except Exception as e:
+            tracker.fail(1, str(e))
+            live.update(tracker)
+            return False
+        live.update(tracker)
+
+    console.print()
+    console.print(f"[green][OK][/green] Program uploaded and loaded in slot {slot_str}")
+    return True

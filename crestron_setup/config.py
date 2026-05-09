@@ -66,6 +66,7 @@ def load_config() -> Config:
         login_attempts=int(data.get("login_attempts", 20)),
         lockout_time=str(data.get("lockout_time", "5m")),
         fips_mode=str(data.get("fips_mode", "OFF")).upper(),
+        last_program_file=data.get("last_program_file", ""),
         firmware_urls=_parse_firmware_urls(data.get("firmware_urls")),
         discovery_timeout=int(discovery.get("timeout", 5)),
         discovery_broadcast_count=int(discovery.get("broadcast_count", 3)),
@@ -97,6 +98,7 @@ def save_config(config: Config) -> Path:
         "login_attempts": config.login_attempts,
         "lockout_time": config.lockout_time,
         "fips_mode": config.fips_mode,
+        "last_program_file": config.last_program_file,
         "firmware_urls": fw_urls,
         "discovery": {
             "timeout": config.discovery_timeout,
