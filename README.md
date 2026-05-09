@@ -5,40 +5,83 @@ Cross-platform interactive console for Crestron processor provisioning. Discover
 ## Features
 
 - **Device Discovery** — CIP protocol broadcast (UDP 41794) finds Crestron processors on the local network, with first-boot detection
-- **Interactive Console** — Arrow-key menus, checkbox device selection, progress bars
+- **Interactive Console** — Arrow-key menus, checkbox device selection, animated progress tracking
 - **Cross-Platform** — Python + paramiko (works on macOS, Linux, and Windows — no `expect` dependency)
 - **Firmware Management** — Download firmware from configurable URLs and upload to processors
-- **5-Phase Provisioning**:
+- **Network Configuration** — Set static IP or DHCP per device during provisioning
+- **Restore & Erase** — Factory-reset devices with `initialize` + `restore` commands
+- **6-Phase Provisioning**:
   1. **Account Creation** — Detects first-boot state; creates admin account or verifies existing credentials
   2. **Public Key Upload** — SFTP `.pub` key to `/user/`
   3. **Configuration** — Timezone, NTP, web ports, login lockout policy, FIPS mode
-  4. **Firmware Upload** — Version comparison; uploads `.puf` to `/firmware/` only if newer
+  4. **Network Configuration** — DHCP or static IP with subnet, gateway, and DNS
   5. **Reboot** — Sends `REBOOT` and polls until back online
-
-## Requirements
-
-- Python 3.10+
-- Root/admin privileges for device discovery (UDP broadcast)
+  6. **Firmware Upload** — Version comparison; uploads `.puf` to `/firmware/` only if newer
 
 ## Installation
 
+### Homebrew (macOS)
+
 ```bash
+brew install mikejobson/tap/crestron-setup
+```
+
+### pip (all platforms)
+
+```bash
+pip install crestron-setup
+```
+
+### Standalone Binary
+
+Download the latest binary from [GitHub Releases](https://github.com/mikejobson/Crestron-Processor-Setup/releases):
+
+| Platform | Download |
+| -------- | -------- |
+| macOS    | `crestron-setup-macos` |
+| Windows  | `crestron-setup-windows.exe` |
+
+```bash
+# macOS — make executable and move to PATH
+chmod +x crestron-setup-macos
+sudo mv crestron-setup-macos /usr/local/bin/crestron-setup
+```
+
+### Scoop (Windows)
+
+```powershell
+scoop bucket add crestron https://github.com/mikejobson/scoop-crestron
+scoop install crestron-setup
+```
+
+### From Source
+
+```bash
+git clone https://github.com/mikejobson/Crestron-Processor-Setup.git
+cd Crestron-Processor-Setup
 python3 -m venv .venv
 source .venv/bin/activate    # Windows: .venv\Scripts\activate
 pip install -e .
 ```
 
+## Requirements
+
+- Python 3.10+ (pip and source installs only — standalone binaries are self-contained)
+- Root/admin privileges for device discovery (UDP broadcast)
+
 ## Usage
 
 ```bash
 # Launch the interactive console
-python -m crestron_setup
+crestron-setup
 
 # Discovery requires elevated privileges
+sudo crestron-setup
+
+# If installed via pip / from source
+python -m crestron_setup
 sudo .venv/bin/python -m crestron_setup
 ```
-
-The console presents a main menu with options to discover devices, set up a device by IP, download firmware, or edit settings.
 
 ## Configuration
 
