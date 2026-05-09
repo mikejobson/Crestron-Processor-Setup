@@ -30,6 +30,7 @@ PHASE_NAMES = [
     "Account Creation",
     "Public Key Upload",
     "Configure Processor",
+    "Network Configuration",
     "Reboot",
     "Firmware Upload",
 ]
@@ -283,12 +284,81 @@ def _run_provisioning(
         results["puf_version"] = current_puf_version
         live.update(tracker)
 
-        # ── Phase 4: Reboot ────────────────────────────────────────────
-        if skip_reboot:
-            tracker.skip(3)
+        # ── Phase 4: Network Configuration ─────────────────────────────
+        net = device.network
+        if not net:
+            tracker.skip(3, "No changes requested")
+            live.update(tracker)
+        elif net.mode == "dhcp":
+            tracker.start(3, "Enabling DHCP…")
+            live.update(tracker)
+            try:
+                with CrestronSSH(host, username, password) as ssh:
+                    ssh.send_command("DHCP 0 ON /now")
+                    # Confirm via IPCONFIG
+                    tracker.details[3] = "Verifying…"
+                    live.update(tracker)
+                    ip_output = ssh.send_command("IPCONFIG /ALL", timeout=10)
+                    results["ip_config"] = ip_output
+                tracker.ok(3, "DHCP enabled")
+            except Exception as e:
+                tracker.fail(3, str(e))
+                live.update(tracker)
+                time.sleep(2)
+                return False
             live.update(tracker)
         else:
-            tracker.start(3, "Sending reboot command…")
+            tracker.start(3, "Setting static IP…")
+            live.update(tracker)
+            try:
+                with CrestronSSH(host, username, password) as ssh:
+                    # Set IP details first (without /now), then disable DHCP
+                    # last with /now so all changes activate together.
+                    net_cmds = [
+                        (f"IPADDRESS 0 {net.ip_address}", f"IP → {net.ip_address}"),
+                        (f"IPMASK 0 {net.subnet_mask}", f"Mask → {net.subnet_mask}"),
+                        (f"DEFROUTER 0 {net.gateway}", f"Gateway → {net.gateway}"),
+                    ]
+                    total = len(net_cmds) + len(net.dns_servers) + 1  # +1 for DHCP OFF
+                    for i, (cmd, desc) in enumerate(net_cmds):
+                        tracker.details[3] = f"{desc} ({i + 1}/{total})"
+                        live.update(tracker)
+                        ssh.send_command(cmd)
+
+                    for i, dns in enumerate(net.dns_servers):
+                        tracker.details[3] = f"DNS → {dns} ({len(net_cmds) + i + 1}/{total})"
+                        live.update(tracker)
+                        ssh.send_command(f"ADDDNS {dns}")
+
+                    # Disable DHCP last — activates all pending static settings
+                    tracker.details[3] = f"Disabling DHCP ({total}/{total})"
+                    live.update(tracker)
+                    ssh.send_command("DHCP 0 OFF /now")
+
+                    # Confirm via IPCONFIG
+                    tracker.details[3] = "Verifying…"
+                    live.update(tracker)
+                    ip_output = ssh.send_command("IPCONFIG /ALL", timeout=10)
+                    results["ip_config"] = ip_output
+
+                # After static IP change the host may have moved
+                if net.ip_address:
+                    host = net.ip_address
+
+                tracker.ok(3, f"{net.ip_address}/{net.subnet_mask}")
+            except Exception as e:
+                tracker.fail(3, str(e))
+                live.update(tracker)
+                time.sleep(2)
+                return False
+            live.update(tracker)
+
+        # ── Phase 5: Reboot ────────────────────────────────────────────
+        if skip_reboot:
+            tracker.skip(4)
+            live.update(tracker)
+        else:
+            tracker.start(4, "Sending reboot command…")
             live.update(tracker)
 
             try:
@@ -298,11 +368,11 @@ def _run_provisioning(
             except Exception:
                 pass  # Connection drops immediately
 
-            tracker.details[3] = "Waiting for processor to go offline…"
+            tracker.details[4] = "Waiting for processor to go offline…"
             live.update(tracker)
             min_wait = 30
             for sec in range(min_wait):
-                tracker.details[3] = f"Rebooting… {min_wait - sec}s before first check"
+                tracker.details[4] = f"Rebooting… {min_wait - sec}s before first check"
                 time.sleep(1)
 
             reboot_timeout = 300
@@ -313,7 +383,7 @@ def _run_provisioning(
             ping_ok = False
 
             while elapsed < reboot_timeout:
-                tracker.details[3] = (
+                tracker.details[4] = (
                     f"Ping OK — checking SSH… {elapsed}s"
                     if ping_ok
                     else f"Waiting for response… {elapsed}s"
@@ -332,57 +402,57 @@ def _run_provisioning(
                 elapsed += 1
 
             if came_back:
-                tracker.ok(3, f"Back online after {elapsed}s")
+                tracker.ok(4, f"Back online after {elapsed}s")
             else:
-                tracker.fail(3, f"Timed out after {reboot_timeout}s")
+                tracker.fail(4, f"Timed out after {reboot_timeout}s")
                 live.update(tracker)
                 time.sleep(2)
                 return False
             live.update(tracker)
 
-        # ── Phase 5: Firmware Upload ───────────────────────────────────
+        # ── Phase 6: Firmware Upload ───────────────────────────────────
         if skip_firmware:
-            tracker.skip(4)
+            tracker.skip(5)
             live.update(tracker)
         else:
-            tracker.start(4, "Checking firmware…")
+            tracker.start(5, "Checking firmware…")
             live.update(tracker)
 
             if not model_name:
-                tracker.skip(4, "No model detected")
+                tracker.skip(5, "No model detected")
             else:
                 fw_path, fw_version = find_local_firmware(model_name, config)
                 if not fw_path:
-                    tracker.skip(4, "No firmware file found")
+                    tracker.skip(5, "No firmware file found")
                 elif current_puf_version and fw_version:
                     cmp = version_compare(fw_version, current_puf_version)
                     if cmp == 0:
-                        tracker.ok(4, f"Already at v{fw_version}")
+                        tracker.ok(5, f"Already at v{fw_version}")
                     elif cmp < 0:
                         tracker.ok(
-                            4,
+                            5,
                             f"Local v{fw_version} older than v{current_puf_version}",
                         )
                     else:
-                        tracker.details[4] = f"Uploading {fw_path.name}…"
+                        tracker.details[5] = f"Uploading {fw_path.name}…"
                         live.update(tracker)
                         if sftp_upload(
                             host, username, password, str(fw_path), "/firmware"
                         ):
-                            tracker.ok(4, f"Uploaded v{fw_version}")
+                            tracker.ok(5, f"Uploaded v{fw_version}")
                             results["firmware"] = fw_version
                         else:
-                            tracker.fail(4, "Upload failed")
+                            tracker.fail(5, "Upload failed")
                 else:
-                    tracker.details[4] = f"Uploading {fw_path.name}…"
+                    tracker.details[5] = f"Uploading {fw_path.name}…"
                     live.update(tracker)
                     if sftp_upload(
                         host, username, password, str(fw_path), "/firmware"
                     ):
-                        tracker.ok(4, f"Uploaded {fw_path.name}")
+                        tracker.ok(5, f"Uploaded {fw_path.name}")
                         results["firmware"] = fw_version or fw_path.name
                     else:
-                        tracker.fail(4, "Upload failed")
+                        tracker.fail(5, "Upload failed")
             live.update(tracker)
 
         # Brief pause so user sees the completed tracker
@@ -436,8 +506,13 @@ def _show_results(
             info.add_row("PUF Version:", results["puf_version"])
         if results.get("firmware"):
             info.add_row("Firmware:", results["firmware"])
-
-        console.print(info)
+        if results.get("ip_config"):
+            console.print(info)
+            console.print()
+            console.print("[bold]Network Configuration:[/bold]")
+            console.print(results["ip_config"])
+        else:
+            console.print(info)
         console.print()
 
 

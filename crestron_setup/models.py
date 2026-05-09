@@ -6,6 +6,17 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class NetworkConfig:
+    """IP configuration for a device's primary NIC."""
+
+    mode: str = "dhcp"  # "dhcp" or "static"
+    ip_address: str = ""
+    subnet_mask: str = "255.255.255.0"
+    gateway: str = ""
+    dns_servers: list[str] = field(default_factory=list)
+
+
+@dataclass
 class Device:
     """A discovered or manually-specified Crestron processor."""
 
@@ -15,6 +26,7 @@ class Device:
     firmware_version: str = ""
     mac: str = ""
     is_first_boot: bool = False
+    network: NetworkConfig | None = None
 
     @property
     def display_name(self) -> str:

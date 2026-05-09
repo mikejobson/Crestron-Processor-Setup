@@ -13,7 +13,7 @@ from rich.text import Text
 from .config import load_config, save_config
 from .discovery import discover_devices, print_device_table
 from .firmware import download_firmware, find_local_firmware
-from .models import Config, Device
+from .models import Config, Device, NetworkConfig
 from .provisioning import provision_device
 from .ssh import CrestronFirstBoot
 from .timezones import timezone_choices, timezone_label
@@ -142,6 +142,25 @@ def _flow_discover(config: Config) -> None:
         return
     username, password = creds
 
+    # Network configuration per device
+    if len(selected_devices) == 1:
+        net = _prompt_network_config(selected_devices[0].ip)
+        if net:
+            selected_devices[0].network = net
+    else:
+        net_mode = questionary.select(
+            "Network configuration:",
+            choices=[
+                questionary.Choice("Skip (keep DHCP on all)", value="skip"),
+                questionary.Choice("Configure each device individually", value="each"),
+            ],
+        ).ask()
+        if net_mode == "each":
+            for dev in selected_devices:
+                net = _prompt_network_config(dev.ip)
+                if net:
+                    dev.network = net
+
     # Provision each device sequentially
     for dev in selected_devices:
         provision_device(dev, username, password, config, console)
@@ -172,6 +191,11 @@ def _flow_manual_setup(config: Config) -> None:
     device.is_first_boot = CrestronFirstBoot.check_first_boot(host)
     if device.is_first_boot:
         console.print("[cyan][INFO][/cyan] Device appears to be in first-boot mode.")
+
+    # Network configuration
+    net = _prompt_network_config(host)
+    if net:
+        device.network = net
 
     provision_device(device, username, password, config, console)
     _pause()
@@ -366,3 +390,52 @@ def _prompt_credentials() -> tuple[str, str] | None:
         return None
 
     return username, password
+
+
+def _prompt_network_config(device_label: str = "") -> NetworkConfig | None:
+    """Prompt for network configuration (DHCP or static IP)."""
+    prefix = f"[{device_label}] " if device_label else ""
+
+    mode = questionary.select(
+        f"{prefix}IP address mode:",
+        choices=[
+            questionary.Choice("DHCP (no changes needed)", value="dhcp"),
+            questionary.Choice("Static IP", value="static"),
+            questionary.Choice("Skip network config", value="skip"),
+        ],
+    ).ask()
+
+    if mode is None or mode == "skip":
+        return None
+
+    if mode == "dhcp":
+        return NetworkConfig(mode="dhcp")
+
+    ip = questionary.text(f"{prefix}IP address:").ask()
+    if not ip:
+        return None
+
+    mask = questionary.text(
+        f"{prefix}Subnet mask:", default="255.255.255.0"
+    ).ask()
+    if not mask:
+        return None
+
+    gw = questionary.text(f"{prefix}Default gateway:").ask()
+    if not gw:
+        return None
+
+    dns_input = questionary.text(
+        f"{prefix}DNS servers (comma-separated, or blank to skip):",
+        default="",
+    ).ask()
+
+    dns_servers = [s.strip() for s in (dns_input or "").split(",") if s.strip()]
+
+    return NetworkConfig(
+        mode="static",
+        ip_address=ip,
+        subnet_mask=mask,
+        gateway=gw,
+        dns_servers=dns_servers,
+    )
