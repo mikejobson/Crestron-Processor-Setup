@@ -1,12 +1,30 @@
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "crestron-setup"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Cross-platform Crestron processor provisioning console"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.10"
+authors = [
+    { name = "Mike Jobson", email = "mike@mikejobson.com" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: System :: Systems Administration",
+]
 dependencies = [
     "paramiko>=3.0",
     "rich>=13.0",
@@ -17,3 +35,14 @@ dependencies = [
 
 [project.scripts]
 crestron-setup = "crestron_setup.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/mikejobson/Crestron-Processor-Setup"
+Repository = "https://github.com/mikejobson/Crestron-Processor-Setup"
+Issues = "https://github.com/mikejobson/Crestron-Processor-Setup/issues"
+
+[tool.setuptools.packages.find]
+include = ["crestron_setup*"]
+
+[tool.setuptools-scm]
+write_to = "crestron_setup/_version.py"

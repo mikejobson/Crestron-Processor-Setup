@@ -17,10 +17,9 @@ from .models import Config, Device
 from .provisioning import provision_device
 from .ssh import CrestronFirstBoot
 from .timezones import timezone_choices, timezone_label
+from . import __version__
 
 console = Console()
-
-APP_VERSION = "1.0.0"
 
 
 def _clear() -> None:
@@ -31,7 +30,7 @@ def _clear() -> None:
 def _banner() -> None:
     """Print the application banner at the top of the screen."""
     title = Text("Crestron Processor Setup", style="bold cyan")
-    subtitle = Text(f"v{APP_VERSION}", style="dim")
+    subtitle = Text(f"v{__version__}", style="dim")
     console.print(
         Panel(
             Text.assemble(title, "  ", subtitle),
