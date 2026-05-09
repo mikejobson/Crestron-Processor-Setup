@@ -14,7 +14,7 @@ from .config import load_config, save_config
 from .discovery import discover_devices, print_device_table
 from .firmware import download_firmware, find_local_firmware
 from .models import Config, Device, NetworkConfig
-from .provisioning import provision_device
+from .provisioning import provision_device, restore_device
 from .ssh import CrestronFirstBoot
 from .timezones import timezone_choices, timezone_label
 from . import __version__
@@ -68,6 +68,7 @@ def main() -> None:
             choices=[
                 questionary.Choice("Discover Devices", value="discover"),
                 questionary.Choice("Setup Device (manual IP)", value="setup"),
+                questionary.Choice("Restore & Erase Device", value="restore"),
                 questionary.Choice("Download Firmware", value="firmware"),
                 questionary.Choice("Settings", value="settings"),
                 questionary.Choice("Exit", value="exit"),
@@ -82,6 +83,8 @@ def main() -> None:
             _flow_discover(config)
         elif choice == "setup":
             _flow_manual_setup(config)
+        elif choice == "restore":
+            _flow_restore()
         elif choice == "firmware":
             _flow_firmware(config)
         elif choice == "settings":
@@ -198,6 +201,43 @@ def _flow_manual_setup(config: Config) -> None:
         device.network = net
 
     provision_device(device, username, password, config, console)
+    _pause()
+
+
+# --------------------------------------------------------------------------- #
+#  Restore & Erase flow
+# --------------------------------------------------------------------------- #
+
+
+def _flow_restore() -> None:
+    """Restore a device to factory defaults (initialize + restore)."""
+    _header("Restore & Erase Device")
+    console.print("[yellow][WARN][/yellow] This will erase all settings and programs "
+                  "and restore the device to factory defaults.\n")
+
+    host = questionary.text("Processor hostname or IP:").ask()
+    if not host:
+        return
+
+    username = questionary.text("Admin username:").ask()
+    if not username:
+        return
+
+    password = questionary.password("Admin password:").ask()
+    if not password:
+        return
+
+    confirm = questionary.confirm(
+        f"Are you sure you want to erase and restore {host}?",
+        default=False,
+    ).ask()
+    if not confirm:
+        console.print("[dim]Cancelled.[/dim]")
+        _pause()
+        return
+
+    device = Device(ip=host)
+    restore_device(device, username, password, console)
     _pause()
 
 

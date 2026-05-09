@@ -61,6 +61,7 @@ class _StepTracker:
         self.phases = phases
         self.statuses: list[str] = ["pending"] * len(phases)
         self.details: list[str] = [""] * len(phases)
+        self._panel_title = f"Provisioning {self.device_label}"
         # Persist one spinner so the animation frame advances across renders
         self._spinner = Spinner("dots", style="cyan")
 
@@ -123,7 +124,7 @@ class _StepTracker:
     def __rich__(self) -> Panel:
         return Panel(
             self._build_table(animated=True),
-            title=f"[bold]Provisioning {self.device_label}[/bold]",
+            title=f"[bold]{self._panel_title}[/bold]",
             border_style="cyan",
             padding=(1, 2),
         )
@@ -514,6 +515,203 @@ def _show_results(
         else:
             console.print(info)
         console.print()
+
+
+RESTORE_PHASE_NAMES = [
+    "Initialize",
+    "Reboot (1 of 2)",
+    "Restore",
+    "Reboot (2 of 2)",
+]
+
+
+def restore_device(
+    device: Device,
+    username: str,
+    password: str,
+    console: Console,
+) -> bool:
+    """Initialize and restore a device to factory defaults.
+
+    Two-step process: initialize -y → reboot → restore -y → reboot → confirm ping.
+    Returns True if the device comes back online after both reboots.
+    """
+    host = device.ip or device.hostname
+    tracker = _StepTracker(host, list(RESTORE_PHASE_NAMES))
+    tracker._panel_title = f"Restore & Erase {host}"
+
+    _clear()
+    success = _run_restore(host, username, password, console, tracker)
+    _show_restore_results(console, tracker, host, success)
+    return success
+
+
+def _run_restore(
+    host: str,
+    username: str,
+    password: str,
+    console: Console,
+    tracker: _StepTracker,
+) -> bool:
+    """Execute initialize/restore phases inside a Live display."""
+
+    with Live(tracker, console=console, refresh_per_second=10) as live:
+
+        # ── Phase 1: Initialize ────────────────────────────────────────
+        tracker.start(0, "Connecting…")
+        live.update(tracker)
+
+        try:
+            with _quiet_ssh():
+                with CrestronSSH(host, username, password) as ssh:
+                    tracker.details[0] = "Sending initialize command…"
+                    live.update(tracker)
+                    ssh.channel.sendall(b"initialize -y\r")  # type: ignore[union-attr]
+                    time.sleep(2)
+        except Exception as e:
+            tracker.fail(0, str(e))
+            live.update(tracker)
+            time.sleep(2)
+            return False
+
+        tracker.ok(0, "Initialize command sent")
+        live.update(tracker)
+
+        # ── Phase 2: Reboot (1 of 2) ──────────────────────────────────
+        tracker.start(1, "Waiting for processor to go offline…")
+        live.update(tracker)
+
+        if not _wait_for_reboot(host, username, password, tracker, 1, live):
+            return False
+
+        # ── Phase 3: Restore ──────────────────────────────────────────
+        tracker.start(2, "Connecting…")
+        live.update(tracker)
+
+        try:
+            with _quiet_ssh():
+                with CrestronSSH(host, username, password) as ssh:
+                    tracker.details[2] = "Sending restore command…"
+                    live.update(tracker)
+                    ssh.channel.sendall(b"restore -y\r")  # type: ignore[union-attr]
+                    time.sleep(2)
+        except Exception as e:
+            tracker.fail(2, str(e))
+            live.update(tracker)
+            time.sleep(2)
+            return False
+
+        tracker.ok(2, "Restore command sent")
+        live.update(tracker)
+
+        # ── Phase 4: Reboot (2 of 2) ──────────────────────────────────
+        tracker.start(3, "Waiting for processor to go offline…")
+        live.update(tracker)
+
+        if not _wait_for_reboot(host, username, password, tracker, 3, live, ping_only=True):
+            return False
+
+        time.sleep(1)
+
+    return all(s in ("ok", "skip") for s in tracker.statuses)
+
+
+def _wait_for_reboot(
+    host: str,
+    username: str,
+    password: str,
+    tracker: _StepTracker,
+    phase: int,
+    live: Live,
+    ping_only: bool = False,
+) -> bool:
+    """Wait for a device to reboot and come back online.
+
+    If ping_only is True, only wait for ping (device will be factory-reset
+    so SSH credentials may no longer work).
+    """
+    min_wait = 30
+    for sec in range(min_wait):
+        tracker.details[phase] = f"Rebooting… {min_wait - sec}s before first check"
+        live.update(tracker)
+        time.sleep(1)
+
+    reboot_timeout = 300
+    poll_interval = 5
+    elapsed = 0
+    came_back = False
+    next_ping_at = 0
+    ping_ok = False
+
+    while elapsed < reboot_timeout:
+        if ping_only:
+            tracker.details[phase] = (
+                f"Ping OK — device online" if ping_ok
+                else f"Waiting for response… {elapsed}s"
+            )
+        else:
+            tracker.details[phase] = (
+                f"Ping OK — checking SSH… {elapsed}s" if ping_ok
+                else f"Waiting for response… {elapsed}s"
+            )
+
+        if elapsed >= next_ping_at:
+            ping_ok = _ping(host)
+            if ping_ok:
+                if ping_only:
+                    came_back = True
+                    break
+                with _quiet_ssh():
+                    if check_ssh_ready(host, username, password, timeout=5):
+                        came_back = True
+                        break
+            next_ping_at = elapsed + poll_interval
+
+        live.update(tracker)
+        time.sleep(1)
+        elapsed += 1
+
+    if came_back:
+        tracker.ok(phase, f"Back online after {elapsed}s")
+    else:
+        tracker.fail(phase, f"Timed out after {reboot_timeout}s")
+        live.update(tracker)
+        time.sleep(2)
+        return False
+    live.update(tracker)
+    return True
+
+
+def _show_restore_results(
+    console: Console,
+    tracker: _StepTracker,
+    host: str,
+    success: bool,
+) -> None:
+    """Display restore results summary."""
+    _clear()
+
+    if success:
+        title = "[bold green]Restore & Erase Complete[/bold green]"
+        border = "green"
+    else:
+        title = "[bold red]Restore & Erase Failed[/bold red]"
+        border = "red"
+
+    console.print(
+        Panel(
+            tracker.render_static(),
+            title=title,
+            border_style=border,
+            padding=(1, 2),
+        )
+    )
+    console.print()
+
+    if success:
+        console.print(f"[green][OK][/green] {host} has been restored to factory defaults.")
+        console.print("[dim]The device is now in first-boot mode.[/dim]")
+    console.print()
 
 
 def _try_login(host: str, username: str, password: str) -> bool:
