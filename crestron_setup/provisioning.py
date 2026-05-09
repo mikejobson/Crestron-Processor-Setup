@@ -24,7 +24,12 @@ from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
-from .firmware import find_local_firmware, version_compare
+from .firmware import (
+    _parse_puf_metadata,
+    download_firmware_quiet,
+    find_local_firmware,
+    version_compare,
+)
 from .models import Config, Device
 from .ssh import CrestronFirstBoot, CrestronSSH, check_ssh_ready, sftp_upload
 from .timezones import timezone_label
@@ -527,6 +532,13 @@ def _run_provisioning_inner(
                 tracker.skip(5, "No model detected")
             else:
                 fw_path, fw_version = find_local_firmware(model_name, config)
+                if not fw_path:
+                    # Try downloading from configured URL
+                    tracker.details[5] = "Downloading firmware…"
+                    live.update(tracker)
+                    fw_path = download_firmware_quiet(model_name, config)
+                    if fw_path:
+                        fw_version, _ = _parse_puf_metadata(fw_path)
                 if not fw_path:
                     tracker.skip(5, "No firmware file found")
                 elif current_puf_version and fw_version:

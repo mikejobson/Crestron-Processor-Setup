@@ -55,6 +55,33 @@ def _cache_dir() -> Path:
     return Path.home() / ".cache" / "crestron-setup" / "firmware"
 
 
+def cache_info() -> tuple[Path, list[tuple[Path, int]]]:
+    """Return the cache directory and a list of (path, size_bytes) for cached files."""
+    cache = _cache_dir()
+    files: list[tuple[Path, int]] = []
+    if cache.exists():
+        for f in sorted(cache.iterdir()):
+            if f.is_file():
+                files.append((f, f.stat().st_size))
+    return cache, files
+
+
+def clear_cache(paths: list[Path] | None = None) -> int:
+    """Delete cached firmware files. If paths is None, delete all. Returns count deleted."""
+    cache = _cache_dir()
+    if not cache.exists():
+        return 0
+    count = 0
+    targets = paths if paths is not None else [f for f in cache.iterdir() if f.is_file()]
+    for f in targets:
+        try:
+            f.unlink()
+            count += 1
+        except OSError:
+            pass
+    return count
+
+
 def _parse_puf_metadata(puf_path: Path) -> tuple[str, list[str]]:
     """Read ~.package.ini from a PUF (ZIP) file.
 
@@ -160,15 +187,13 @@ def download_firmware(
     cache = _cache_dir()
     cache.mkdir(parents=True, exist_ok=True)
 
-    # Derive filename from URL
-    url_path = source.url.rstrip("/").split("/")[-1]
-    if not url_path.lower().endswith(".puf"):
-        url_path = f"{model.lower()}_latest.puf"
-    dest = cache / url_path
+    # Derive initial filename from URL (may be overridden by Content-Disposition)
+    url_filename = source.url.rstrip("/").split("/")[-1]
+    if not url_filename.lower().endswith(".puf"):
+        url_filename = f"{model.lower()}_latest.puf"
 
     console.print(f"Downloading firmware for {model}...")
     console.print(f"  URL:  {source.url}")
-    console.print(f"  Dest: {dest}")
 
     try:
         with httpx.stream(
@@ -177,6 +202,23 @@ def download_firmware(
             resp.raise_for_status()
             total = int(resp.headers.get("content-length", 0))
 
+            # Use Content-Disposition filename if available
+            cd = resp.headers.get("content-disposition", "")
+            real_name = ""
+            if cd:
+                import re as _re
+                # Try filename*= (RFC 5987) first, then filename=
+                m = _re.search(r"filename\*\s*=\s*(?:UTF-8''|utf-8'')(.+?)(?:;|$)", cd)
+                if not m:
+                    m = _re.search(r'filename\s*=\s*"?([^";]+)"?', cd)
+                if m:
+                    from urllib.parse import unquote
+                    real_name = unquote(m.group(1)).strip()
+
+            dest_name = real_name if real_name and real_name.lower().endswith(".puf") else url_filename
+            dest = cache / dest_name
+            console.print(f"  Dest: {dest}")
+
             with Progress(
                 TextColumn("[bold]{task.description}"),
                 BarColumn(),
@@ -184,7 +226,7 @@ def download_firmware(
                 TransferSpeedColumn(),
                 console=console,
             ) as progress:
-                task = progress.add_task(url_path, total=total or None)
+                task = progress.add_task(dest_name, total=total or None)
                 with open(dest, "wb") as f:
                     for chunk in resp.iter_bytes(chunk_size=65536):
                         f.write(chunk)
@@ -204,3 +246,54 @@ def download_firmware(
             dest.unlink()
 
     return None
+
+
+def download_firmware_quiet(
+    model: str,
+    config: Config,
+) -> Path | None:
+    """Download firmware for a model silently (no console output).
+
+    Used during provisioning to auto-download when no local file exists.
+    Returns the local path to the downloaded file, or None on failure.
+    """
+    source = config.firmware_urls.get(model.upper())
+    if not source or not source.url:
+        return None
+
+    cache = _cache_dir()
+    cache.mkdir(parents=True, exist_ok=True)
+
+    url_filename = source.url.rstrip("/").split("/")[-1]
+    if not url_filename.lower().endswith(".puf"):
+        url_filename = f"{model.lower()}_latest.puf"
+
+    try:
+        with httpx.stream(
+            "GET", source.url, headers=source.headers, follow_redirects=True, timeout=300
+        ) as resp:
+            resp.raise_for_status()
+
+            # Use Content-Disposition filename if available
+            cd = resp.headers.get("content-disposition", "")
+            real_name = ""
+            if cd:
+                import re as _re
+                m = _re.search(r"filename\*\s*=\s*(?:UTF-8''|utf-8'')(.+?)(?:;|$)", cd)
+                if not m:
+                    m = _re.search(r'filename\s*=\s*"?([^";]+)"?', cd)
+                if m:
+                    from urllib.parse import unquote
+                    real_name = unquote(m.group(1)).strip()
+
+            dest_name = real_name if real_name and real_name.lower().endswith(".puf") else url_filename
+            dest = cache / dest_name
+
+            with open(dest, "wb") as f:
+                for chunk in resp.iter_bytes(chunk_size=65536):
+                    f.write(chunk)
+
+        return dest
+
+    except Exception:
+        return None

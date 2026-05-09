@@ -16,7 +16,7 @@ from rich.text import Text
 
 from .config import load_config, save_config
 from .discovery import discover_devices, print_device_table
-from .firmware import download_firmware, find_local_firmware
+from .firmware import cache_info, clear_cache, download_firmware, download_firmware_quiet, find_local_firmware
 from .models import Config, Device, NetworkConfig
 from .provisioning import (
     DeviceResult,
@@ -82,6 +82,7 @@ def main() -> None:
                 questionary.Choice("Upload Program", value="program"),
                 questionary.Choice("Restore & Erase Device", value="restore"),
                 questionary.Choice("Download Firmware", value="firmware"),
+                questionary.Choice("Clear Firmware Cache", value="cache"),
                 questionary.Choice("Settings", value="settings"),
                 questionary.Choice("Exit", value="exit"),
             ],
@@ -101,6 +102,8 @@ def main() -> None:
             _flow_restore()
         elif choice == "firmware":
             _flow_firmware(config)
+        elif choice == "cache":
+            _flow_clear_cache()
         elif choice == "settings":
             config = _flow_settings(config)
 
@@ -196,6 +199,34 @@ def _flow_discover(config: Config) -> Config:
                     net = _prompt_network_config(dev.ip)
                     if net:
                         dev.network = net
+
+        # Check firmware availability for unique models
+        models_with_url: set[str] = set()
+        for dev in selected_devices:
+            if dev.model and config.firmware_urls.get(dev.model.upper()):
+                models_with_url.add(dev.model.upper())
+
+        if models_with_url:
+            # Show current local firmware status per model
+            for mdl in sorted(models_with_url):
+                fw_path, fw_ver = find_local_firmware(mdl, config)
+                if fw_path:
+                    console.print(
+                        f"[cyan][INFO][/cyan] {mdl}: local firmware {fw_path.name} (v{fw_ver})"
+                    )
+                else:
+                    console.print(
+                        f"[cyan][INFO][/cyan] {mdl}: no local firmware found"
+                    )
+
+            dl = questionary.confirm(
+                "Check for latest firmware from download URL?", default=True,
+            ).ask()
+            if dl:
+                for mdl in sorted(models_with_url):
+                    console.print()
+                    download_firmware(mdl, config, console)
+                console.print()
 
     elif action == "program":
         default_path = config.last_program_file or ""
@@ -560,6 +591,70 @@ def _flow_firmware(config: Config) -> None:
             return
 
     download_firmware(model, config, console)
+    _pause()
+
+
+# --------------------------------------------------------------------------- #
+#  Clear firmware cache flow
+# --------------------------------------------------------------------------- #
+
+
+def _flow_clear_cache() -> None:
+    """Show cached firmware files and let the user delete them."""
+    _header("Clear Firmware Cache")
+    cache_dir, files = cache_info()
+
+    if not files:
+        console.print("[dim]Firmware cache is empty.[/dim]")
+        console.print(f"[dim]Cache directory: {cache_dir}[/dim]")
+        _pause()
+        return
+
+    total_size = sum(s for _, s in files)
+    console.print(f"[bold]Cache directory:[/bold] {cache_dir}")
+    console.print(f"[bold]Total size:[/bold] {total_size / 1_048_576:.1f} MB "
+                  f"({len(files)} file{'s' if len(files) != 1 else ''})\n")
+
+    choices = [
+        questionary.Choice(
+            f"{f.name}  ({size / 1_048_576:.1f} MB)",
+            value=i,
+        )
+        for i, (f, size) in enumerate(files)
+    ]
+
+    action = questionary.select(
+        "What to clear?",
+        choices=[
+            questionary.Choice("Delete all cached files", value="all"),
+            questionary.Choice("Select files to delete", value="pick"),
+            questionary.Choice("Cancel", value="cancel"),
+        ],
+    ).ask()
+
+    if action is None or action == "cancel":
+        return
+
+    if action == "all":
+        confirm = questionary.confirm(
+            f"Delete all {len(files)} cached files ({total_size / 1_048_576:.1f} MB)?",
+            default=False,
+        ).ask()
+        if confirm:
+            count = clear_cache()
+            console.print(f"[green][OK][/green] Deleted {count} file(s).")
+    else:
+        selected = questionary.checkbox(
+            "Select files to delete:",
+            choices=choices,
+        ).ask()
+        if selected:
+            paths = [files[i][0] for i in selected]
+            count = clear_cache(paths)
+            console.print(f"[green][OK][/green] Deleted {count} file(s).")
+        else:
+            console.print("[dim]No files selected.[/dim]")
+
     _pause()
 
 
