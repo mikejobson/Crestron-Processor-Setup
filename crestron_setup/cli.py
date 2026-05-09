@@ -81,7 +81,7 @@ def main() -> None:
             console.print("[dim]Goodbye.[/dim]")
             break
         elif choice == "discover":
-            _flow_discover(config)
+            config = _flow_discover(config)
         elif choice == "setup":
             _flow_manual_setup(config)
         elif choice == "program":
@@ -99,8 +99,8 @@ def main() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _flow_discover(config: Config) -> None:
-    """Discover devices on the LAN, check first-boot state, select, and provision."""
+def _flow_discover(config: Config) -> Config:
+    """Discover devices on the LAN, select an action, pick devices, and execute."""
     _header("Discover Devices")
     devices = discover_devices(config, console)
 
@@ -109,7 +109,7 @@ def _flow_discover(config: Config) -> None:
                       "Make sure you're on the same subnet and running with "
                       "elevated privileges (sudo).")
         _pause()
-        return
+        return config
 
     # Check first-boot state for each device
     console.print("Checking first-boot state...")
@@ -120,8 +120,22 @@ def _flow_discover(config: Config) -> None:
     print_device_table(devices, console)
     console.print()
 
-    # Let user select devices
-    choices = [
+    # Pick action first
+    action = questionary.select(
+        "What do you want to do?",
+        choices=[
+            questionary.Choice("Provision", value="provision"),
+            questionary.Choice("Upload Program", value="program"),
+            questionary.Choice("Restore & Erase", value="restore"),
+            questionary.Choice("Back to Main Menu", value="back"),
+        ],
+    ).ask()
+
+    if action is None or action == "back":
+        return config
+
+    # Select devices
+    device_choices = [
         questionary.Choice(
             f"{dev.ip:<17} {dev.hostname:<20} {dev.model:<12} "
             f"{'[FIRST BOOT]' if dev.is_first_boot else ''}",
@@ -131,46 +145,95 @@ def _flow_discover(config: Config) -> None:
     ]
 
     selected_indices = questionary.checkbox(
-        "Select devices to provision:",
-        choices=choices,
+        "Select devices:",
+        choices=device_choices,
     ).ask()
 
     if not selected_indices:
         console.print("[dim]No devices selected.[/dim]")
         _pause()
-        return
+        return config
 
     selected_devices = [devices[i] for i in selected_indices]
 
-    # Get credentials
+    # Get credentials (all actions need them)
     creds = _prompt_credentials()
     if not creds:
-        return
+        return config
     username, password = creds
 
-    # Network configuration per device
-    if len(selected_devices) == 1:
-        net = _prompt_network_config(selected_devices[0].ip)
-        if net:
-            selected_devices[0].network = net
-    else:
-        net_mode = questionary.select(
-            "Network configuration:",
-            choices=[
-                questionary.Choice("Skip (keep DHCP on all)", value="skip"),
-                questionary.Choice("Configure each device individually", value="each"),
-            ],
-        ).ask()
-        if net_mode == "each":
-            for dev in selected_devices:
-                net = _prompt_network_config(dev.ip)
-                if net:
-                    dev.network = net
+    # ── Provision ──────────────────────────────────────────────────────
+    if action == "provision":
+        # Network configuration per device
+        if len(selected_devices) == 1:
+            net = _prompt_network_config(selected_devices[0].ip)
+            if net:
+                selected_devices[0].network = net
+        else:
+            net_mode = questionary.select(
+                "Network configuration:",
+                choices=[
+                    questionary.Choice("Skip (keep DHCP on all)", value="skip"),
+                    questionary.Choice("Configure each device individually", value="each"),
+                ],
+            ).ask()
+            if net_mode == "each":
+                for dev in selected_devices:
+                    net = _prompt_network_config(dev.ip)
+                    if net:
+                        dev.network = net
 
-    # Provision each device sequentially
-    for dev in selected_devices:
-        provision_device(dev, username, password, config, console)
+        for dev in selected_devices:
+            provision_device(dev, username, password, config, console)
+
+    # ── Upload Program ─────────────────────────────────────────────────
+    elif action == "program":
+        default_path = config.last_program_file or ""
+        program_path = questionary.path(
+            "Program file path:",
+            default=default_path,
+        ).ask()
+        if not program_path:
+            return config
+
+        slot_input = questionary.text("Program slot:", default="1").ask()
+        if not slot_input:
+            return config
+        try:
+            slot = int(slot_input)
+            if slot < 1:
+                raise ValueError
+        except ValueError:
+            console.print("[red]Invalid slot number.[/red]")
+            _pause()
+            return config
+
+        config.last_program_file = program_path
+        save_config(config)
+
+        for dev in selected_devices:
+            host = dev.ip or dev.hostname
+            upload_program(host, username, password, program_path, slot, console)
+
+    # ── Restore & Erase ────────────────────────────────────────────────
+    elif action == "restore":
+        device_list = ", ".join(d.ip or d.hostname for d in selected_devices)
+        console.print(f"\n[yellow][WARN][/yellow] This will erase all settings and "
+                      f"programs on: {device_list}\n")
+        confirm = questionary.confirm(
+            "Are you sure you want to erase and restore these devices?",
+            default=False,
+        ).ask()
+        if not confirm:
+            console.print("[dim]Cancelled.[/dim]")
+            _pause()
+            return config
+
+        for dev in selected_devices:
+            restore_device(dev, username, password, console)
+
     _pause()
+    return config
 
 
 # --------------------------------------------------------------------------- #

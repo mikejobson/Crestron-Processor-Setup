@@ -133,20 +133,18 @@ def discover_devices(config: Config, console: Console | None = None) -> list[Dev
         sock.close()
         return devices
 
-    with Live(_discovery_panel(spinner, devices, "Broadcasting…"), console=console, refresh_per_second=10):
+    with Live(_discovery_panel(spinner, devices, "Broadcasting…"), console=console, refresh_per_second=10) as live:
         # Send discovery packets
         for i in range(repeats):
             sock.sendto(packet, ("255.255.255.255", CIP_PORT))
             time.sleep(0.2)
 
-    # Collect responses with animated display
-    start = time.time()
-    with Live(_discovery_panel(spinner, devices, "Listening for responses…"), console=console, refresh_per_second=10) as live:
+        # Collect responses
+        start = time.time()
         while time.time() - start < timeout:
             try:
                 data, (ip, _) = sock.recvfrom(2048)
             except socket.timeout:
-                # Update display even when no data arrives
                 elapsed = time.time() - start
                 remaining = max(0, timeout - elapsed)
                 live.update(_discovery_panel(spinner, devices, f"Listening… {remaining:.0f}s remaining"))
