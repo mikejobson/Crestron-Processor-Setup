@@ -44,5 +44,8 @@ Issues = "https://github.com/mikejobson/Crestron-Processor-Setup/issues"
 [tool.setuptools.packages.find]
 include = ["crestron_setup*"]
 
+[tool.setuptools.package-data]
+crestron_setup = ["welcome_animation.json"]
+
 [tool.setuptools_scm]
 write_to = "crestron_setup/_version.py"

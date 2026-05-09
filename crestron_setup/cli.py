@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 import os
+import select
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+
+try:
+    import termios
+    import tty
+    _HAS_TERMIOS = True
+except ImportError:
+    _HAS_TERMIOS = False
 
 import questionary
 from rich.console import Console
@@ -36,6 +44,145 @@ console = Console()
 def _clear() -> None:
     """Clear the terminal screen."""
     os.system("cls" if os.name == "nt" else "clear")
+
+
+def _load_animation() -> tuple[list, int]:
+    """Load and parse the welcome animation JSON into frame data.
+
+    Returns (frames, canvas_height) where frames is a list of
+    (line_text, color_map) tuples, color_map is {(col, row): hex_color}.
+    """
+    import json
+    from importlib.resources import files
+
+    try:
+        anim_path = files("crestron_setup").joinpath("welcome_animation.json")
+        data = json.loads(anim_path.read_text(encoding="utf-8"))
+    except Exception:
+        return [], 0
+
+    canvas_height = data.get("canvas", {}).get("height", 22)
+    frames = []
+    for frame in data["frames"]:
+        lines = frame["contentString"].split("\n")
+
+        # Parse foreground color map
+        fg_raw = frame.get("colors", {}).get("foreground", "{}")
+        if isinstance(fg_raw, str):
+            fg_map = json.loads(fg_raw)
+        else:
+            fg_map = fg_raw
+
+        # Convert "x,y" keys to (x, y) tuples
+        color_map: dict[tuple[int, int], str] = {}
+        for key, color in fg_map.items():
+            parts = key.split(",")
+            color_map[(int(parts[0]), int(parts[1]))] = color
+
+        frames.append((lines, color_map))
+
+    return frames, canvas_height
+
+
+def _render_frame(
+    lines: list[str],
+    color_map: dict[tuple[int, int], str],
+    target_height: int = 0,
+) -> Text:
+    """Render a single animation frame as a Rich Text object with per-char colors."""
+    result = Text()
+    # Pad to target height so text below doesn't jump
+    padded = list(lines)
+    while target_height and len(padded) < target_height:
+        padded.append("")
+    for row, line in enumerate(padded):
+        for col, char in enumerate(line):
+            color = color_map.get((col, row))
+            if color:
+                result.append(char, style=color)
+            else:
+                result.append(char)
+        if row < len(padded) - 1:
+            result.append("\n")
+    return result
+
+
+def _key_pressed() -> bool:
+    """Check if a key has been pressed (non-blocking)."""
+    if not _HAS_TERMIOS:
+        # Windows: use msvcrt if available
+        try:
+            import msvcrt
+            return msvcrt.kbhit()
+        except ImportError:
+            return False
+    try:
+        return bool(select.select([sys.stdin], [], [], 0)[0])
+    except Exception:
+        return False
+
+
+def _splash() -> None:
+    """Show the animated welcome screen looping until any key is pressed."""
+    _clear()
+
+    frames, canvas_height = _load_animation()
+    if not frames:
+        # Fallback: simple text banner if animation file missing
+        console.print(
+            Panel(
+                Text.assemble(
+                    Text("Crestron Processor Setup", style="bold cyan"),
+                    "  ",
+                    Text(f"v{__version__}", style="dim"),
+                ),
+                border_style="cyan",
+                padding=(0, 2),
+            )
+        )
+        console.print()
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    # Build the static info text shown below the animation
+    info = Text.from_markup(
+        f"\n[bold cyan]Crestron Processor Setup[/bold cyan]  [dim]v{__version__}[/dim]\n"
+        "\n"
+        "[dim]Automated provisioning tool for Crestron control processors.\n"
+        "Configure settings in ~/.config/crestron-setup/config.yaml\n"
+        "or create a config.yaml file in this directory.\n"
+        "\n"
+        "Press any key to continue…[/dim]"
+    )
+
+    # Switch terminal to cbreak mode so keypresses are immediate
+    old_settings = None
+    if _HAS_TERMIOS:
+        fd = sys.stdin.fileno()
+        try:
+            old_settings = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
+        except Exception:
+            pass
+
+    try:
+        with Live(console=console, refresh_per_second=30, transient=True) as live:
+            while True:
+                for lines, color_map in frames:
+                    if _key_pressed():
+                        # Drain the keypress
+                        try:
+                            sys.stdin.read(1)
+                        except Exception:
+                            pass
+                        return
+                    rendered = _render_frame(lines, color_map, canvas_height)
+                    rendered.append_text(info)
+                    live.update(rendered)
+                    time.sleep(1 / 30)
+    finally:
+        if old_settings is not None:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
 def _banner() -> None:
@@ -69,6 +216,8 @@ def _pause() -> None:
 def main() -> None:
     """Entry point for the Crestron setup console."""
     config = load_config()
+
+    _splash()
 
     while True:
         _clear()
