@@ -53,11 +53,17 @@ def _load_animation() -> tuple[list, int]:
     (line_text, color_map) tuples, color_map is {(col, row): hex_color}.
     """
     import json
-    from importlib.resources import files
+    from pathlib import Path
 
     try:
-        anim_path = files("crestron_setup").joinpath("welcome_animation.json")
-        data = json.loads(anim_path.read_text(encoding="utf-8"))
+        # PyInstaller extracts data files to sys._MEIPASS
+        base = Path(getattr(sys, "_MEIPASS", ""))
+        anim_file = base / "crestron_setup" / "welcome_animation.json"
+        if not anim_file.is_file():
+            from importlib.resources import files
+
+            anim_file = files("crestron_setup").joinpath("welcome_animation.json")
+        data = json.loads(anim_file.read_text(encoding="utf-8"))
     except Exception:
         return [], 0
 

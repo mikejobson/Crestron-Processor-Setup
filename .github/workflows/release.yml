@@ -73,12 +73,16 @@ jobs:
         run: pip install . pyinstaller
 
       - name: Build executable
-        run: >
-          pyinstaller
-          --onefile
-          --name crestron-setup
-          --collect-submodules crestron_setup
-          crestron_setup/__main__.py
+        shell: bash
+        run: |
+          sep=":"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then sep=";"; fi
+          pyinstaller \
+            --onefile \
+            --name crestron-setup \
+            --collect-submodules crestron_setup \
+            --add-data "crestron_setup/welcome_animation.json${sep}crestron_setup" \
+            crestron_setup/__main__.py
 
       - uses: actions/upload-artifact@v4
         with:
