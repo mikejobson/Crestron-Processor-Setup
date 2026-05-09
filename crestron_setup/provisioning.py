@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -86,6 +87,19 @@ def _quiet_ssh():
         sys.stderr = old_stderr
         for name, level in saved.items():
             logging.getLogger(name).setLevel(level)
+
+
+class _NullLive:
+    """No-op replacement for rich.live.Live used in headless/parallel mode."""
+
+    def update(self, _renderable=None) -> None:
+        pass
+
+    def __enter__(self) -> _NullLive:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        pass
 
 
 class _StepTracker:
@@ -177,14 +191,26 @@ def provision_device(
     console: Console,
     skip_firmware: bool = False,
     skip_reboot: bool = False,
-) -> bool:
+    headless: bool = False,
+    tracker: _StepTracker | None = None,
+) -> bool | tuple[bool, _StepTracker, dict[str, str]]:
     """Run all 5 provisioning phases against a single device.
 
-    Returns True if provisioning completed successfully.
+    When headless=True, returns (success, tracker, results) without displaying.
+    Otherwise returns True/False and shows results on console.
     """
     host = device.ip or device.hostname
-    tracker = _StepTracker(host, list(PHASE_NAMES))
+    if tracker is None:
+        tracker = _StepTracker(host, list(PHASE_NAMES))
     results: dict[str, str] = {"host": host, "username": username}
+
+    if headless:
+        success = _run_provisioning(
+            host, device, username, password, config, console,
+            tracker, results, skip_firmware, skip_reboot,
+            headless=True,
+        )
+        return success, tracker, results
 
     _clear()
     success = _run_provisioning(
@@ -206,6 +232,7 @@ def _run_provisioning(
     results: dict[str, str],
     skip_firmware: bool,
     skip_reboot: bool,
+    headless: bool = False,
 ) -> bool:
     """Execute all phases inside a Live display. Returns True on success."""
     model_name = ""
@@ -220,6 +247,7 @@ def _run_provisioning(
         return _run_provisioning_inner(
             host, device, username, password, config, console,
             tracker, results, skip_firmware, skip_reboot, pubkey_path,
+            headless=headless,
         )
     finally:
         if _is_temp_key and pubkey_path and pubkey_path.exists():
@@ -238,12 +266,14 @@ def _run_provisioning_inner(
     skip_firmware: bool,
     skip_reboot: bool,
     pubkey_path: Path | None,
+    headless: bool = False,
 ) -> bool:
     """Execute all phases inside a Live display. Returns True on success."""
     model_name = ""
     current_puf_version = ""
 
-    with Live(tracker, console=console, refresh_per_second=10) as live:
+    live_cm: Live | _NullLive = _NullLive() if headless else Live(tracker, console=console, refresh_per_second=10)
+    with live_cm as live:
 
         # ── Phase 1: Account Creation ──────────────────────────────────
         tracker.start(0, "Checking credentials…")
@@ -620,15 +650,22 @@ def restore_device(
     username: str,
     password: str,
     console: Console,
-) -> bool:
+    headless: bool = False,
+    tracker: _StepTracker | None = None,
+) -> bool | tuple[bool, _StepTracker]:
     """Initialize and restore a device to factory defaults.
 
-    Two-step process: initialize -y → reboot → restore -y → reboot → confirm ping.
-    Returns True if the device comes back online after both reboots.
+    When headless=True, returns (success, tracker) without displaying.
+    Otherwise returns True/False and shows results on console.
     """
     host = device.ip or device.hostname
-    tracker = _StepTracker(host, list(RESTORE_PHASE_NAMES))
-    tracker._panel_title = f"Restore & Erase {host}"
+    if tracker is None:
+        tracker = _StepTracker(host, list(RESTORE_PHASE_NAMES))
+        tracker._panel_title = f"Restore & Erase {host}"
+
+    if headless:
+        success = _run_restore(host, username, password, console, tracker, headless=True)
+        return success, tracker
 
     _clear()
     success = _run_restore(host, username, password, console, tracker)
@@ -642,10 +679,12 @@ def _run_restore(
     password: str,
     console: Console,
     tracker: _StepTracker,
+    headless: bool = False,
 ) -> bool:
     """Execute initialize/restore phases inside a Live display."""
 
-    with Live(tracker, console=console, refresh_per_second=10) as live:
+    live_cm: Live | _NullLive = _NullLive() if headless else Live(tracker, console=console, refresh_per_second=10)
+    with live_cm as live:
 
         # ── Phase 1: Initialize ────────────────────────────────────────
         tracker.start(0, "Connecting…")
@@ -842,22 +881,28 @@ def upload_program(
     program_path: str,
     slot: int,
     console: Console,
-) -> bool:
+    headless: bool = False,
+    tracker: _StepTracker | None = None,
+) -> bool | tuple[bool, _StepTracker]:
     """Upload a program file to a processor and load it.
 
     1. SFTP the file to /programXX/
     2. Run PROGLOAD -P:XX to load it
 
-    Returns True on success.
+    When headless=True, returns (success, tracker) without displaying.
+    Otherwise returns True/False.
     """
-    tracker = _StepTracker(host, list(PROGRAM_PHASE_NAMES))
-    tracker._panel_title = f"Program Upload — {host}"
+    if tracker is None:
+        tracker = _StepTracker(host, list(PROGRAM_PHASE_NAMES))
+        tracker._panel_title = f"Program Upload — {host}"
 
     slot_str = f"{slot:02d}"
     remote_dir = f"/program{slot_str}"
     local = Path(program_path).expanduser()
 
-    with Live(tracker, console=console, refresh_per_second=10) as live:
+    live_cm: Live | _NullLive = _NullLive() if headless else Live(tracker, console=console, refresh_per_second=10)
+    success = False
+    with live_cm as live:
         # ── Phase 1: Upload ────────────────────────────────────────────
         tracker.start(0, f"Uploading {local.name}…")
         live.update(tracker)
@@ -865,30 +910,151 @@ def upload_program(
         if not local.exists():
             tracker.fail(0, f"File not found: {local}")
             live.update(tracker)
-            return False
-
-        if sftp_upload(host, username, password, str(local), remote_dir):
-            tracker.ok(0, f"{local.name} → {remote_dir}/")
-        else:
+        elif not sftp_upload(host, username, password, str(local), remote_dir):
             tracker.fail(0, "Upload failed")
             live.update(tracker)
-            return False
-        live.update(tracker)
-
-        # ── Phase 2: Load ──────────────────────────────────────────────
-        tracker.start(1, f"Loading program in slot {slot_str}…")
-        live.update(tracker)
-
-        try:
-            with CrestronSSH(host, username, password) as ssh:
-                output = ssh.send_command(f"PROGLOAD -P:{slot_str}", timeout=30)
-                tracker.ok(1, f"Slot {slot_str} loaded")
-        except Exception as e:
-            tracker.fail(1, str(e))
+        else:
+            tracker.ok(0, f"{local.name} → {remote_dir}/")
             live.update(tracker)
-            return False
-        live.update(tracker)
 
-    console.print()
-    console.print(f"[green][OK][/green] Program uploaded and loaded in slot {slot_str}")
-    return True
+            # ── Phase 2: Load ──────────────────────────────────────────
+            tracker.start(1, f"Loading program in slot {slot_str}…")
+            live.update(tracker)
+
+            try:
+                with CrestronSSH(host, username, password) as ssh:
+                    output = ssh.send_command(f"PROGLOAD -P:{slot_str}", timeout=30)
+                    tracker.ok(1, f"Slot {slot_str} loaded")
+                    success = True
+            except Exception as e:
+                tracker.fail(1, str(e))
+            live.update(tracker)
+
+    if headless:
+        return success, tracker
+
+    if success:
+        console.print()
+        console.print(f"[green][OK][/green] Program uploaded and loaded in slot {slot_str}")
+    return success
+
+
+# --------------------------------------------------------------------------- #
+#  Parallel Execution
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class DeviceResult:
+    """Outcome of a parallel action on a single device."""
+    device_label: str
+    action: str
+    success: bool
+    tracker: _StepTracker
+    results: dict[str, str] = field(default_factory=dict)
+
+
+class _ParallelDisplay:
+    """Combined live renderable showing per-step progress of all parallel actions."""
+
+    def __init__(self, device_results: list[DeviceResult]) -> None:
+        self._results = device_results
+        self._spinner = Spinner("dots", style="cyan")
+
+    def _step_icons(self, tracker: _StepTracker) -> Text:
+        """Build a compact step progress line like: ✓ ✓ ● ○ ○ ○"""
+        parts: list[tuple[str, str]] = []
+        for i, s in enumerate(tracker.statuses):
+            if s == "ok":
+                parts.append(("✓", "green"))
+            elif s == "fail":
+                parts.append(("✗", "red"))
+            elif s == "skip":
+                parts.append(("–", "dim"))
+            elif s == "active":
+                parts.append(("●", "cyan bold"))
+            else:
+                parts.append(("○", "dim"))
+        result = Text()
+        for j, (char, style) in enumerate(parts):
+            if j > 0:
+                result.append(" ")
+            result.append(char, style=style)
+        return result
+
+    def __rich__(self) -> Panel:
+        outer = Table.grid(padding=(0, 0))
+        outer.add_column()
+
+        for dr in self._results:
+            tracker = dr.tracker
+
+            # Find active/last phase info
+            active_detail = ""
+            overall = "pending"
+            for i, s in enumerate(tracker.statuses):
+                if s == "active":
+                    overall = "active"
+                    active_detail = tracker.phases[i]
+                    d = tracker.details[i]
+                    if d:
+                        active_detail += f" — {d}"
+                    break
+                elif s == "fail":
+                    overall = "fail"
+                    active_detail = tracker.phases[i]
+                    d = tracker.details[i]
+                    if d:
+                        active_detail += f" — {d}"
+                    break
+            if overall == "pending" and all(
+                s in ("ok", "skip") for s in tracker.statuses
+            ):
+                overall = "done"
+
+            # Device header row with status icon
+            row = Table.grid(padding=(0, 1))
+            row.add_column(width=3)
+            row.add_column(min_width=30)
+            row.add_column()
+
+            if overall == "active":
+                icon: object = self._spinner
+                label = Text.from_markup(
+                    f"[bold cyan]{dr.device_label}[/bold cyan]"
+                )
+            elif overall == "fail":
+                icon = Text.from_markup("[red]✗[/red]")
+                label = Text.from_markup(
+                    f"[red]{dr.device_label}[/red]"
+                )
+            elif overall == "done":
+                icon = Text.from_markup("[green]✓[/green]")
+                label = Text.from_markup(f"{dr.device_label}")
+            else:
+                icon = Text.from_markup("[dim]○[/dim]")
+                label = Text.from_markup(f"[dim]{dr.device_label}[/dim]")
+
+            steps = self._step_icons(tracker)
+            row.add_row(icon, label, steps)
+            outer.add_row(row)
+
+            # Detail line showing current/last phase
+            if active_detail:
+                detail_style = "red" if overall == "fail" else "dim"
+                outer.add_row(
+                    Text.from_markup(f"    [{detail_style}]{active_detail}[/{detail_style}]")
+                )
+            elif overall == "done":
+                outer.add_row(Text.from_markup("    [dim]Complete[/dim]"))
+            else:
+                outer.add_row(Text.from_markup("    [dim]Waiting…[/dim]"))
+
+            # Spacer between devices
+            outer.add_row(Text(""))
+
+        return Panel(
+            outer,
+            title="[bold]Parallel Execution[/bold]",
+            border_style="cyan",
+            padding=(1, 2),
+        )

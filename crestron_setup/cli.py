@@ -4,17 +4,28 @@ from __future__ import annotations
 
 import os
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import questionary
 from rich.console import Console
+from rich.live import Live
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
 from .config import load_config, save_config
 from .discovery import discover_devices, print_device_table
 from .firmware import download_firmware, find_local_firmware
 from .models import Config, Device, NetworkConfig
-from .provisioning import provision_device, restore_device, upload_program
+from .provisioning import (
+    DeviceResult,
+    _ParallelDisplay,
+    _StepTracker,
+    provision_device,
+    restore_device,
+    upload_program,
+)
 from .ssh import CrestronFirstBoot
 from .timezones import timezone_choices, timezone_label
 from . import __version__
@@ -162,7 +173,10 @@ def _flow_discover(config: Config) -> Config:
         return config
     username, password = creds
 
-    # ── Provision ──────────────────────────────────────────────────────
+    # Gather action-specific inputs before starting parallel execution
+    program_path: str = ""
+    slot: int = 1
+
     if action == "provision":
         # Network configuration per device
         if len(selected_devices) == 1:
@@ -183,10 +197,6 @@ def _flow_discover(config: Config) -> Config:
                     if net:
                         dev.network = net
 
-        for dev in selected_devices:
-            provision_device(dev, username, password, config, console)
-
-    # ── Upload Program ─────────────────────────────────────────────────
     elif action == "program":
         default_path = config.last_program_file or ""
         program_path = questionary.path(
@@ -211,11 +221,6 @@ def _flow_discover(config: Config) -> Config:
         config.last_program_file = program_path
         save_config(config)
 
-        for dev in selected_devices:
-            host = dev.ip or dev.hostname
-            upload_program(host, username, password, program_path, slot, console)
-
-    # ── Restore & Erase ────────────────────────────────────────────────
     elif action == "restore":
         device_list = ", ".join(d.ip or d.hostname for d in selected_devices)
         console.print(f"\n[yellow][WARN][/yellow] This will erase all settings and "
@@ -229,11 +234,175 @@ def _flow_discover(config: Config) -> Config:
             _pause()
             return config
 
-        for dev in selected_devices:
+    # ── Single device: run normally with full display ──────────────────
+    if len(selected_devices) == 1:
+        dev = selected_devices[0]
+        if action == "provision":
+            provision_device(dev, username, password, config, console)
+        elif action == "program":
+            host = dev.ip or dev.hostname
+            upload_program(host, username, password, program_path, slot, console)
+        elif action == "restore":
             restore_device(dev, username, password, console)
+        _pause()
+        return config
 
-    _pause()
+    # ── Multiple devices: run in parallel with combined display ────────
+    device_results = _run_parallel(
+        action, selected_devices, username, password,
+        config, program_path, slot,
+    )
+    _show_parallel_summary(device_results, config)
     return config
+
+
+# --------------------------------------------------------------------------- #
+#  Parallel execution helpers
+# --------------------------------------------------------------------------- #
+
+
+def _run_parallel(
+    action: str,
+    devices: list[Device],
+    username: str,
+    password: str,
+    config: Config,
+    program_path: str = "",
+    slot: int = 1,
+) -> list[DeviceResult]:
+    """Run an action on multiple devices in parallel with a combined live display."""
+    # Pre-create DeviceResult entries with placeholder trackers for display
+    device_results: list[DeviceResult] = []
+    for dev in devices:
+        ip = dev.ip or dev.hostname
+        label = f"{ip}  {dev.hostname}" if dev.hostname and dev.hostname != ip else ip
+        if dev.model:
+            label += f"  ({dev.model})"
+        if action == "provision":
+            from .provisioning import PHASE_NAMES
+            tracker = _StepTracker(label, list(PHASE_NAMES))
+        elif action == "program":
+            from .provisioning import PROGRAM_PHASE_NAMES
+            tracker = _StepTracker(label, list(PROGRAM_PHASE_NAMES))
+        else:  # restore
+            from .provisioning import RESTORE_PHASE_NAMES
+            tracker = _StepTracker(label, list(RESTORE_PHASE_NAMES))
+        device_results.append(DeviceResult(
+            device_label=label, action=action, success=False, tracker=tracker,
+        ))
+
+    display = _ParallelDisplay(device_results)
+
+    def _worker(dev: Device, dr: DeviceResult) -> None:
+        """Thread worker — runs action headlessly using dr.tracker for live updates."""
+        host = dev.ip or dev.hostname
+        if action == "provision":
+            result = provision_device(
+                dev, username, password, config, console,
+                headless=True, tracker=dr.tracker,
+            )
+            dr.success, _, dr.results = result  # type: ignore[misc]
+        elif action == "program":
+            result = upload_program(
+                host, username, password, program_path, slot, console,
+                headless=True, tracker=dr.tracker,
+            )
+            dr.success = result[0]  # type: ignore[index]
+        elif action == "restore":
+            result = restore_device(
+                dev, username, password, console,
+                headless=True, tracker=dr.tracker,
+            )
+            dr.success = result[0]  # type: ignore[index]
+
+    _clear()
+    with Live(display, console=console, refresh_per_second=8) as live:
+        with ThreadPoolExecutor(max_workers=len(devices)) as pool:
+            futures = [
+                pool.submit(_worker, dev, dr)
+                for dev, dr in zip(devices, device_results)
+            ]
+            # Poll until all futures complete, refreshing display continuously
+            while not all(f.done() for f in futures):
+                live.update(display)
+                time.sleep(0.25)
+        live.update(display)
+
+    return device_results
+
+
+def _show_parallel_summary(
+    device_results: list[DeviceResult],
+    config: Config,
+) -> None:
+    """Show a summary table and let the user drill into individual results."""
+    while True:
+        _clear()
+        _banner()
+
+        # Summary table
+        all_ok = all(dr.success for dr in device_results)
+        title = ("[bold green]All Devices Complete[/bold green]" if all_ok
+                 else "[bold yellow]Results Summary[/bold yellow]")
+        border = "green" if all_ok else "yellow"
+
+        table = Table(show_header=True, padding=(0, 1))
+        table.add_column("#", style="dim", width=3)
+        table.add_column("Device", style="cyan", min_width=18)
+        table.add_column("Action", min_width=12)
+        table.add_column("Result", min_width=10)
+        table.add_column("Details", min_width=30)
+
+        for i, dr in enumerate(device_results):
+            status = "[green]✓ OK[/green]" if dr.success else "[red]✗ Failed[/red]"
+            # Get last phase detail
+            detail = ""
+            for j in range(len(dr.tracker.statuses) - 1, -1, -1):
+                s = dr.tracker.statuses[j]
+                if s in ("ok", "fail", "skip"):
+                    detail = dr.tracker.details[j] or dr.tracker.phases[j]
+                    if s == "fail":
+                        detail = f"[red]{detail}[/red]"
+                    break
+            table.add_row(str(i + 1), dr.device_label, dr.action.title(), status, detail)
+
+        console.print(Panel(table, title=title, border_style=border, padding=(1, 2)))
+        console.print()
+
+        # Drill-down menu
+        choices = [
+            questionary.Choice(
+                f"{dr.device_label} — {'OK' if dr.success else 'FAILED'}",
+                value=i,
+            )
+            for i, dr in enumerate(device_results)
+        ]
+        choices.append(questionary.Choice("Back to Main Menu", value=-1))
+
+        pick = questionary.select(
+            "View details for a device:",
+            choices=choices,
+        ).ask()
+
+        if pick is None or pick == -1:
+            return
+
+        # Show detailed tracker for selected device
+        dr = device_results[pick]
+        _clear()
+        _banner()
+
+        success_label = "[bold green]Success[/bold green]" if dr.success else "[bold red]Failed[/bold red]"
+        console.print(
+            Panel(
+                dr.tracker.render_static(),
+                title=f"{dr.device_label} — {success_label}",
+                border_style="green" if dr.success else "red",
+                padding=(1, 2),
+            )
+        )
+        console.print()
+        _pause()
 
 
 # --------------------------------------------------------------------------- #
