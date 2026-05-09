@@ -36,9 +36,9 @@ pip install crestron-setup
 
 Download the latest binary from [GitHub Releases](https://github.com/mikejobson/Crestron-Processor-Setup/releases):
 
-| Platform | Download |
-| -------- | -------- |
-| macOS    | `crestron-setup-macos` |
+| Platform | Download                     |
+| -------- | ---------------------------- |
+| macOS    | `crestron-setup-macos`       |
 | Windows  | `crestron-setup-windows.exe` |
 
 ```bash

@@ -440,7 +440,15 @@ def _run_provisioning(
                         if sftp_upload(
                             host, username, password, str(fw_path), "/firmware"
                         ):
-                            tracker.ok(5, f"Uploaded v{fw_version}")
+                            tracker.details[5] = "Installing firmware…"
+                            live.update(tracker)
+                            try:
+                                with _quiet_ssh():
+                                    with CrestronSSH(host, username, password) as ssh:
+                                        ssh.send_command("PUF", timeout=60)
+                            except Exception:
+                                pass  # PUF triggers reboot, connection drops
+                            tracker.ok(5, f"Uploaded v{fw_version} — installing (device will reboot)")
                             results["firmware"] = fw_version
                         else:
                             tracker.fail(5, "Upload failed")
@@ -450,7 +458,15 @@ def _run_provisioning(
                     if sftp_upload(
                         host, username, password, str(fw_path), "/firmware"
                     ):
-                        tracker.ok(5, f"Uploaded {fw_path.name}")
+                        tracker.details[5] = "Installing firmware…"
+                        live.update(tracker)
+                        try:
+                            with _quiet_ssh():
+                                with CrestronSSH(host, username, password) as ssh:
+                                    ssh.send_command("PUF", timeout=60)
+                        except Exception:
+                            pass  # PUF triggers reboot, connection drops
+                        tracker.ok(5, f"Uploaded {fw_path.name} — installing (device will reboot)")
                         results["firmware"] = fw_version or fw_path.name
                     else:
                         tracker.fail(5, "Upload failed")
