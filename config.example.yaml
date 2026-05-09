@@ -1,0 +1,49 @@
+# Default configuration for Crestron processor setup.
+# Copy to ~/.config/crestron-setup/config.yaml (macOS/Linux)
+#       or %APPDATA%\crestron-setup\config.yaml (Windows)
+
+# Timezone ID to set on processors (use TIMEZONE LIST on a processor to see options)
+timezone: "33" # 33 = GMT Standard Time
+
+# NTP server for time synchronisation
+ntp_server: "pool.ntp.org"
+
+# SSH public key file to upload to processors
+pubkey_file: "~/.ssh/id_rsa.pub"
+
+# Local directory to search for .puf firmware files (fallback if no download URL)
+firmware_dir: "~/Sync/Crestron Firmware"
+
+# Web server ports
+web_port: 8080
+secure_web_port: 8443
+
+# Login lockout policy
+user_login_attempts: 5
+user_lockout_time: "1m"
+login_attempts: 20
+lockout_time: "5m"
+
+# FIPS mode (ON or OFF)
+fips_mode: "OFF"
+
+# Firmware download URLs per model.
+# These are checked when running firmware updates. Leave empty or remove
+# entries for models where you provide firmware files locally.
+# Supports optional auth headers — see examples below.
+firmware_urls:
+  # CP4:
+  #   url: "https://example.com/firmware/cp4_latest.puf"
+  #   headers:
+  #     Authorization: "Bearer YOUR_TOKEN_HERE"
+  # MC4:
+  #   url: "https://example.com/firmware/mc4_latest.puf"
+  # CP4N:
+  #   url: "https://example.com/firmware/cp4n_latest.puf"
+  # RMC4:
+  #   url: "https://example.com/firmware/rmc4_latest.puf"
+
+# Discovery settings
+discovery:
+  timeout: 5 # Seconds to listen for responses
+  broadcast_count: 3 # Number of broadcast packets to send

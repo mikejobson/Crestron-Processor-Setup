@@ -1,60 +1,75 @@
 # Crestron Processor Setup
 
-Bash script that automates end-to-end Crestron processor provisioning via `expect`-driven SSH/SFTP sessions.
+Cross-platform interactive console for Crestron processor provisioning. Discovers devices on the LAN, creates accounts, configures settings, and manages firmware — all from a terminal menu.
 
-## What It Does
+## Features
 
-Runs five sequential phases against a target processor:
-
-1. **Account Creation** — SSH as `crestron` (first-boot default) or fall back to existing credentials; creates a new admin user
-2. **Public Key Upload** — SFTP your `.pub` key to `/user/` on the processor
-3. **Configuration** — Sets timezone, NTP, web ports (8080/8443), login lockout policy, FIPS mode, and captures `VER -V` output
-4. **Firmware Upload** — Compares local PUF version against the processor; uploads to `/firmware/` only if newer
-5. **Reboot** — Sends `REBOOT` and polls until the processor is back online
+- **Device Discovery** — CIP protocol broadcast (UDP 41794) finds Crestron processors on the local network, with first-boot detection
+- **Interactive Console** — Arrow-key menus, checkbox device selection, progress bars
+- **Cross-Platform** — Python + paramiko (works on macOS, Linux, and Windows — no `expect` dependency)
+- **Firmware Management** — Download firmware from configurable URLs and upload to processors
+- **5-Phase Provisioning**:
+  1. **Account Creation** — Detects first-boot state; creates admin account or verifies existing credentials
+  2. **Public Key Upload** — SFTP `.pub` key to `/user/`
+  3. **Configuration** — Timezone, NTP, web ports, login lockout policy, FIPS mode
+  4. **Firmware Upload** — Version comparison; uploads `.puf` to `/firmware/` only if newer
+  5. **Reboot** — Sends `REBOOT` and polls until back online
 
 ## Requirements
 
-- macOS (uses built-in `expect`)
-- `ssh`, `sftp`, `ping`
-- A `.pub` key file and firmware `.puf` files on disk
+- Python 3.10+
+- Root/admin privileges for device discovery (UDP broadcast)
 
-## Configuration
+## Installation
 
-Edit the constants at the top of `setup_processor.sh`:
-
-| Variable       | Default                        | Description                                |
-| -------------- | ------------------------------ | ------------------------------------------ |
-| `FIRMWARE_DIR` | `$HOME/Sync/Crestron Firmware` | Directory containing `.puf` firmware files |
-| `PUBKEY_FILE`  | `$HOME/.ssh/id_rsa.pub`        | SSH public key to upload                   |
-| `TIMEZONE`     | `33` (GMT Standard Time)       | Crestron timezone ID                       |
-| `NTP_SERVER`   | `pool.ntp.org`                 | NTP server address                         |
+```bash
+python3 -m venv .venv
+source .venv/bin/activate    # Windows: .venv\Scripts\activate
+pip install -e .
+```
 
 ## Usage
 
 ```bash
-./setup_processor.sh <hostname-or-ip>
+# Launch the interactive console
+python -m crestron_setup
+
+# Discovery requires elevated privileges
+sudo .venv/bin/python -m crestron_setup
 ```
 
-The script will prompt for the new admin username and password interactively.
+The console presents a main menu with options to discover devices, set up a device by IP, download firmware, or edit settings.
+
+## Configuration
+
+Settings are stored in `~/.config/crestron-setup/config.yaml` (macOS/Linux) or `%APPDATA%\crestron-setup\config.yaml` (Windows). A local `config.yaml` in the working directory takes priority.
+
+Copy `config.example.yaml` to get started. Key settings:
+
+| Setting           | Default                    | Description                         |
+| ----------------- | -------------------------- | ----------------------------------- |
+| `timezone`        | `33` (GMT Standard Time)   | Crestron timezone ID                |
+| `ntp_server`      | `pool.ntp.org`             | NTP server address                  |
+| `pubkey_file`     | `~/.ssh/id_rsa.pub`        | SSH public key to upload            |
+| `firmware_dir`    | `~/Sync/Crestron Firmware` | Local firmware directory (fallback) |
+| `web_port`        | `8080`                     | Web server port                     |
+| `secure_web_port` | `8443`                     | Secure web server port              |
+| `firmware_urls`   | _(empty)_                  | Per-model firmware download URLs    |
 
 ## Files
 
-| File                                     | Purpose                                                        |
-| ---------------------------------------- | -------------------------------------------------------------- |
-| `setup_processor.sh`                     | Main provisioning script                                       |
-| `example commands.txt`                   | Reference log of a manual setup session                        |
-| `crestron_command_reference.md`          | CLI command reference (414 commands) generated from a live CP4 |
-| `.github/prompts/crestron-cli.prompt.md` | Copilot prompt for looking up CLI commands                     |
+| Path                            | Purpose                                                      |
+| ------------------------------- | ------------------------------------------------------------ |
+| `crestron_setup/`               | Python package — CLI, discovery, SSH, provisioning, firmware |
+| `config.example.yaml`           | Template configuration file                                  |
+| `setup_processor.sh`            | Legacy bash script (macOS only, requires `expect`)           |
+| `crestron_command_reference.md` | CLI command reference (414 commands) from a live CP4         |
+| `example commands.txt`          | Reference log of a manual setup session                      |
 
-## Testing
+## Legacy Bash Script
+
+The original `setup_processor.sh` is still included for reference. It requires macOS with `expect` and takes a single hostname argument:
 
 ```bash
-# Syntax check
-bash -n setup_processor.sh
-
-# Lint
-shellcheck setup_processor.sh
-
-# Run against a processor
-./setup_processor.sh 192.168.1.100
+./setup_processor.sh <hostname-or-ip>
 ```
