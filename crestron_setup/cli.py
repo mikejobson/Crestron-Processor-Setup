@@ -25,7 +25,7 @@ from rich.text import Text
 from .config import load_config, save_config
 from .discovery import discover_devices, print_device_table
 from .firmware import cache_info, clear_cache, download_firmware, download_firmware_quiet, find_local_firmware
-from .models import Config, Device, NetworkConfig, Profile, SKIP
+from .models import Config, Device, NetworkConfig, Profile, SKIP, resolve_profile
 from .provisioning import (
     DeviceResult,
     _ParallelDisplay,
@@ -742,8 +742,13 @@ def _show_parallel_summary(
         _banner()
 
         if dr.action == "dry_run" and dr.results:
+            # Reconstruct resolved profile for skipped-field display
+            dr_profile = dr.results.get("profile")
+            dr_resolved = resolve_profile(dr_profile, config) if dr_profile else None
+            effective_config = dr_resolved.config if dr_resolved else config
             _show_dry_run_results(
-                console, dr.tracker, dr.results, dr.success, config,
+                console, dr.tracker, dr.results, dr.success, effective_config,
+                resolved=dr_resolved,
             )
         else:
             success_label = "[bold green]Success[/bold green]" if dr.success else "[bold red]Failed[/bold red]"
