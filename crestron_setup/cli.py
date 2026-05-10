@@ -25,7 +25,7 @@ from rich.text import Text
 from .config import load_config, save_config
 from .discovery import discover_devices, print_device_table
 from .firmware import cache_info, clear_cache, download_firmware, download_firmware_quiet, find_local_firmware
-from .models import Config, Device, NetworkConfig
+from .models import Config, Device, NetworkConfig, Profile, SKIP
 from .provisioning import (
     DeviceResult,
     _ParallelDisplay,
@@ -57,6 +57,44 @@ _install_method: InstallMethod = InstallMethod.DEV
 def _clear() -> None:
     """Clear the terminal screen."""
     os.system("cls" if os.name == "nt" else "clear")
+
+
+def match_profile(model: str, config: Config) -> str | None:
+    """Find the first profile whose model patterns match a device model."""
+    if not model or not config.profiles:
+        return None
+    for name, profile in config.profiles.items():
+        if profile.matches_model(model):
+            return name
+    return None
+
+
+def _prompt_profile_selection(
+    config: Config,
+    suggested: str | None = None,
+) -> str | None:
+    """Prompt the user to select a configuration profile.
+
+    Returns profile name or None for default (no profile).
+    """
+    if not config.profiles:
+        return None
+
+    choices = []
+    if suggested:
+        choices.append(questionary.Choice(
+            f"{suggested} (suggested)",
+            value=suggested,
+        ))
+    choices.append(questionary.Choice("Default (no profile)", value=None))
+    for name in config.profiles:
+        if name != suggested:
+            choices.append(questionary.Choice(name, value=name))
+
+    return questionary.select(
+        "Configuration profile:",
+        choices=choices,
+    ).ask()
 
 
 def _load_animation() -> tuple[list, int]:
@@ -458,13 +496,27 @@ def _flow_discover(config: Config) -> Config:
             _pause()
             return config
 
+    # Profile selection for provision actions
+    profile_name: str | None = None
+    if action in ("provision", "dry_run") and config.profiles:
+        # Auto-suggest based on device models
+        models = {d.model for d in selected_devices if d.model}
+        suggested = None
+        for m in models:
+            suggested = match_profile(m, config)
+            if suggested:
+                break
+        profile_name = _prompt_profile_selection(config, suggested)
+
     # ── Single device: run normally with full display ──────────────────
     if len(selected_devices) == 1:
         dev = selected_devices[0]
         if action == "provision":
-            provision_device(dev, username, password, config, console)
+            provision_device(dev, username, password, config, console,
+                             profile_name=profile_name)
         elif action == "dry_run":
-            provision_device(dev, username, password, config, console, dry_run=True)
+            provision_device(dev, username, password, config, console,
+                             dry_run=True, profile_name=profile_name)
         elif action == "program":
             host = dev.ip or dev.hostname
             upload_program(host, username, password, program_path, slot, console)
@@ -476,7 +528,7 @@ def _flow_discover(config: Config) -> Config:
     # ── Multiple devices: run in parallel with combined display ────────
     device_results = _run_parallel(
         action, selected_devices, username, password,
-        config, program_path, slot,
+        config, program_path, slot, profile_name=profile_name,
     )
     _show_parallel_summary(device_results, config)
     return config
@@ -495,6 +547,7 @@ def _run_parallel(
     config: Config,
     program_path: str = "",
     slot: int = 1,
+    profile_name: str | None = None,
 ) -> list[DeviceResult]:
     """Run an action on multiple devices in parallel with a combined live display."""
     # Pre-create DeviceResult entries with placeholder trackers for display
@@ -530,12 +583,14 @@ def _run_parallel(
             result = provision_device(
                 dev, username, password, config, console,
                 headless=True, tracker=dr.tracker,
+                profile_name=profile_name,
             )
             dr.success, _, dr.results = result  # type: ignore[misc]
         elif action == "dry_run":
             result = provision_device(
                 dev, username, password, config, console,
                 headless=True, tracker=dr.tracker, dry_run=True,
+                profile_name=profile_name,
             )
             dr.success, _, dr.results = result  # type: ignore[misc]
         elif action == "program":
@@ -687,9 +742,15 @@ def _flow_manual_setup(config: Config) -> None:
     if not mode:
         return
 
+    # Profile selection
+    profile_name: str | None = None
+    if config.profiles:
+        profile_name = _prompt_profile_selection(config)
+
     provision_device(
         device, username, password, config, console,
         dry_run=(mode == "dry_run"),
+        profile_name=profile_name,
     )
     _pause()
 
@@ -934,12 +995,14 @@ def _flow_settings(config: Config) -> Config:
         console.print(f"  Secure Web Port:     {config.secure_web_port}")
         console.print(f"  FIPS Mode:           {config.fips_mode}")
         console.print(f"  Firmware URLs:       {len(config.firmware_urls)} configured")
+        console.print(f"  Profiles:            {len(config.profiles)} configured")
         console.print()
 
         action = questionary.select(
             "Settings",
             choices=[
                 questionary.Choice("Edit a setting", value="edit"),
+                questionary.Choice("Manage Profiles", value="profiles"),
                 questionary.Choice("Add firmware URL", value="add_fw"),
                 questionary.Choice("Save to disk", value="save"),
                 questionary.Choice("Back to main menu", value="back"),
@@ -950,6 +1013,8 @@ def _flow_settings(config: Config) -> Config:
             return config
         elif action == "edit":
             config = _edit_setting(config)
+        elif action == "profiles":
+            config = _flow_manage_profiles(config)
         elif action == "add_fw":
             config = _add_firmware_url(config)
         elif action == "save":
@@ -1044,6 +1109,255 @@ def _add_firmware_url(config: Config) -> Config:
 
     config.firmware_urls[model.upper()] = FirmwareSource(url=url, headers=headers)
     console.print(f"[green][OK][/green] Firmware URL added for {model.upper()}")
+    return config
+
+
+# --------------------------------------------------------------------------- #
+#  Profile management flow
+# --------------------------------------------------------------------------- #
+
+
+def _flow_manage_profiles(config: Config) -> Config:
+    """Manage configuration profiles (list, create, edit, delete)."""
+    from .models import ExtraCommand, PROFILE_SETTING_FIELDS
+
+    while True:
+        _header("Manage Profiles")
+
+        if config.profiles:
+            table = Table(show_header=True, padding=(0, 1))
+            table.add_column("Profile", style="cyan")
+            table.add_column("Models")
+            table.add_column("Overrides")
+            table.add_column("Skipped")
+            table.add_column("Extra Cmds")
+
+            for name, profile in config.profiles.items():
+                models_str = ", ".join(profile.models) if profile.models else "—"
+                overrides = sum(
+                    1 for f in PROFILE_SETTING_FIELDS
+                    if getattr(profile, f) is not None and getattr(profile, f) is not SKIP
+                )
+                skips = sum(
+                    1 for f in PROFILE_SETTING_FIELDS
+                    if getattr(profile, f) is SKIP
+                )
+                extras = len(profile.extra_commands)
+                table.add_row(name, models_str, str(overrides), str(skips), str(extras))
+
+            console.print(table)
+            console.print()
+        else:
+            console.print("[dim]No profiles configured.[/dim]")
+            console.print()
+
+        action = questionary.select(
+            "Profile management",
+            choices=[
+                questionary.Choice("Create profile", value="create"),
+                *(
+                    [
+                        questionary.Choice("Edit profile", value="edit"),
+                        questionary.Choice("Delete profile", value="delete"),
+                    ]
+                    if config.profiles
+                    else []
+                ),
+                questionary.Choice("Back", value="back"),
+            ],
+        ).ask()
+
+        if action is None or action == "back":
+            return config
+
+        if action == "create":
+            config = _create_profile(config)
+        elif action == "edit":
+            config = _edit_profile(config)
+        elif action == "delete":
+            config = _delete_profile(config)
+
+    return config
+
+
+def _create_profile(config: Config) -> Config:
+    """Create a new configuration profile."""
+    from .models import ExtraCommand, PROFILE_SETTING_FIELDS
+
+    name = questionary.text("Profile name (e.g., touch-panels):").ask()
+    if not name or name in config.profiles:
+        if name in config.profiles:
+            console.print(f"[red]Profile '{name}' already exists.[/red]")
+        return config
+
+    # Model patterns
+    models_input = questionary.text(
+        "Model patterns (comma-separated globs, e.g., TSW-*,TS-*):",
+        default="",
+    ).ask()
+    models = [m.strip() for m in (models_input or "").split(",") if m.strip()]
+
+    # Settings to skip
+    setting_labels = {
+        "timezone": "Timezone",
+        "ntp_server": "NTP Server",
+        "web_port": "Web Port",
+        "secure_web_port": "Secure Web Port",
+        "fips_mode": "FIPS Mode",
+        "user_login_attempts": "User Login Attempts",
+        "user_lockout_time": "User Lockout Time",
+        "login_attempts": "Console Login Attempts",
+        "lockout_time": "Console Lockout Time",
+    }
+
+    skip_choices = [
+        questionary.Choice(f"{label} (currently: {getattr(config, field)})", value=field)
+        for field, label in setting_labels.items()
+    ]
+
+    skipped = questionary.checkbox(
+        "Select settings to SKIP for this profile (these commands won't be sent):",
+        choices=skip_choices,
+    ).ask() or []
+
+    # Extra commands
+    extra_commands: list[ExtraCommand] = []
+    while True:
+        add_cmd = questionary.confirm("Add a custom command?", default=False).ask()
+        if not add_cmd:
+            break
+        cmd = questionary.text("Command:").ask()
+        if not cmd:
+            break
+        label = questionary.text("Label (optional):", default="").ask()
+        extra_commands.append(ExtraCommand(command=cmd, label=label or ""))
+
+    # Build profile
+    kwargs: dict = {"models": models, "extra_commands": extra_commands}
+    for field in skipped:
+        kwargs[field] = SKIP
+
+    profile = Profile(**kwargs)
+    config.profiles[name] = profile
+    console.print(f"[green][OK][/green] Profile '{name}' created.")
+    console.print("[dim]Use 'Save to disk' in Settings to persist.[/dim]")
+    return config
+
+
+def _edit_profile(config: Config) -> Config:
+    """Edit an existing profile."""
+    from .models import ExtraCommand, PROFILE_SETTING_FIELDS
+
+    if not config.profiles:
+        return config
+
+    name = questionary.select(
+        "Select profile to edit:",
+        choices=list(config.profiles.keys()) + ["Cancel"],
+    ).ask()
+
+    if not name or name == "Cancel":
+        return config
+
+    profile = config.profiles[name]
+
+    # Edit model patterns
+    current_models = ", ".join(profile.models) if profile.models else ""
+    models_input = questionary.text(
+        "Model patterns (comma-separated):",
+        default=current_models,
+    ).ask()
+    profile.models = [m.strip() for m in (models_input or "").split(",") if m.strip()]
+
+    # Edit skipped settings
+    setting_labels = {
+        "timezone": "Timezone",
+        "ntp_server": "NTP Server",
+        "web_port": "Web Port",
+        "secure_web_port": "Secure Web Port",
+        "fips_mode": "FIPS Mode",
+        "user_login_attempts": "User Login Attempts",
+        "user_lockout_time": "User Lockout Time",
+        "login_attempts": "Console Login Attempts",
+        "lockout_time": "Console Lockout Time",
+    }
+
+    current_skipped = [
+        f for f in PROFILE_SETTING_FIELDS
+        if getattr(profile, f) is SKIP
+    ]
+
+    skip_choices = [
+        questionary.Choice(
+            label,
+            value=field,
+            checked=field in current_skipped,
+        )
+        for field, label in setting_labels.items()
+    ]
+
+    skipped = questionary.checkbox(
+        "Select settings to SKIP:",
+        choices=skip_choices,
+    ).ask() or []
+
+    # Update skipped fields
+    for field in PROFILE_SETTING_FIELDS:
+        if field in skipped:
+            setattr(profile, field, SKIP)
+        elif getattr(profile, field) is SKIP:
+            setattr(profile, field, None)  # Un-skip → inherit
+
+    # Edit extra commands
+    if profile.extra_commands:
+        console.print(f"[bold]Current extra commands ({len(profile.extra_commands)}):[/bold]")
+        for ec in profile.extra_commands:
+            label = f" ({ec.label})" if ec.label else ""
+            console.print(f"  • {ec.command}{label}")
+
+        clear_cmds = questionary.confirm(
+            "Clear existing extra commands?", default=False,
+        ).ask()
+        if clear_cmds:
+            profile.extra_commands = []
+
+    while True:
+        add_cmd = questionary.confirm("Add a custom command?", default=False).ask()
+        if not add_cmd:
+            break
+        cmd = questionary.text("Command:").ask()
+        if not cmd:
+            break
+        label = questionary.text("Label (optional):", default="").ask()
+        profile.extra_commands.append(ExtraCommand(command=cmd, label=label or ""))
+
+    console.print(f"[green][OK][/green] Profile '{name}' updated.")
+    console.print("[dim]Use 'Save to disk' in Settings to persist.[/dim]")
+    return config
+
+
+def _delete_profile(config: Config) -> Config:
+    """Delete a configuration profile."""
+    if not config.profiles:
+        return config
+
+    name = questionary.select(
+        "Select profile to delete:",
+        choices=list(config.profiles.keys()) + ["Cancel"],
+    ).ask()
+
+    if not name or name == "Cancel":
+        return config
+
+    confirm = questionary.confirm(
+        f"Delete profile '{name}'?", default=False,
+    ).ask()
+
+    if confirm:
+        del config.profiles[name]
+        console.print(f"[green][OK][/green] Profile '{name}' deleted.")
+        console.print("[dim]Use 'Save to disk' in Settings to persist.[/dim]")
+
     return config
 
 

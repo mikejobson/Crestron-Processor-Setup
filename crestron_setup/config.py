@@ -8,7 +8,7 @@ from pathlib import Path
 
 import yaml
 
-from .models import Config, FirmwareSource
+from .models import Config, ExtraCommand, FirmwareSource, Profile, SKIP
 
 APP_NAME = "crestron-setup"
 
@@ -41,6 +41,92 @@ def _parse_firmware_urls(raw: dict | None) -> dict[str, FirmwareSource]:
     return result
 
 
+def _parse_profiles(raw: dict | None) -> dict[str, Profile]:
+    """Parse profiles section from YAML into Profile objects."""
+    if not raw:
+        return {}
+    result: dict[str, Profile] = {}
+    # Settings that can be overridden (must match Profile field names)
+    setting_fields = {
+        "timezone", "ntp_server", "pubkey_file", "web_port",
+        "secure_web_port", "user_login_attempts", "user_lockout_time",
+        "login_attempts", "lockout_time", "fips_mode",
+    }
+    int_fields = {
+        "web_port", "secure_web_port", "user_login_attempts", "login_attempts",
+    }
+
+    for name, pdata in raw.items():
+        if not isinstance(pdata, dict):
+            continue
+        kwargs: dict = {}
+
+        # Model patterns
+        models = pdata.get("models", [])
+        if isinstance(models, str):
+            models = [models]
+        kwargs["models"] = models
+
+        # Extra commands
+        raw_cmds = pdata.get("extra_commands", [])
+        extras: list[ExtraCommand] = []
+        for cmd in raw_cmds:
+            if isinstance(cmd, str):
+                extras.append(ExtraCommand(command=cmd))
+            elif isinstance(cmd, dict):
+                extras.append(ExtraCommand(
+                    command=cmd.get("command", ""),
+                    label=cmd.get("label", ""),
+                ))
+        kwargs["extra_commands"] = extras
+
+        # Setting overrides
+        for fld in setting_fields:
+            if fld in pdata:
+                val = pdata[fld]
+                if val is False:
+                    kwargs[fld] = SKIP
+                elif fld in int_fields:
+                    kwargs[fld] = int(val)
+                elif fld == "fips_mode":
+                    kwargs[fld] = str(val).upper()
+                else:
+                    kwargs[fld] = str(val)
+
+        result[name] = Profile(**kwargs)
+    return result
+
+
+def _serialize_profiles(profiles: dict[str, Profile]) -> dict:
+    """Serialize profiles back to YAML-compatible dicts."""
+    result: dict = {}
+    setting_fields = {
+        "timezone", "ntp_server", "pubkey_file", "web_port",
+        "secure_web_port", "user_login_attempts", "user_lockout_time",
+        "login_attempts", "lockout_time", "fips_mode",
+    }
+    for name, profile in profiles.items():
+        pdata: dict = {}
+        if profile.models:
+            pdata["models"] = profile.models
+        # Setting overrides
+        for fld in setting_fields:
+            val = getattr(profile, fld)
+            if val is SKIP:
+                pdata[fld] = False
+            elif val is not None:
+                pdata[fld] = val
+        # Extra commands
+        if profile.extra_commands:
+            pdata["extra_commands"] = [
+                {"command": ec.command, "label": ec.label}
+                if ec.label else ec.command
+                for ec in profile.extra_commands
+            ]
+        result[name] = pdata
+    return result
+
+
 def load_config() -> Config:
     """Load config from YAML, falling back to defaults for missing keys."""
     # Check local config first, then platform config dir
@@ -70,6 +156,7 @@ def load_config() -> Config:
         firmware_urls=_parse_firmware_urls(data.get("firmware_urls")),
         discovery_timeout=int(discovery.get("timeout", 5)),
         discovery_broadcast_count=int(discovery.get("broadcast_count", 3)),
+        profiles=_parse_profiles(data.get("profiles")),
     )
 
 
@@ -86,7 +173,7 @@ def save_config(config: Config) -> Path:
         else:
             fw_urls[model] = src.url
 
-    data = {
+    data: dict = {
         "timezone": config.timezone,
         "ntp_server": config.ntp_server,
         "pubkey_file": config.pubkey_file,
@@ -105,6 +192,9 @@ def save_config(config: Config) -> Path:
             "broadcast_count": config.discovery_broadcast_count,
         },
     }
+
+    if config.profiles:
+        data["profiles"] = _serialize_profiles(config.profiles)
 
     with open(path, "w") as f:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)

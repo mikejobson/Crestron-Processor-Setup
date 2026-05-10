@@ -30,7 +30,7 @@ from .firmware import (
     find_local_firmware,
     version_compare,
 )
-from .models import Config, Device
+from .models import Config, Device, ExtraCommand, SKIP, resolve_profile, ResolvedProfile
 from .ssh import CrestronFirstBoot, CrestronSSH, check_ssh_ready, sftp_upload
 from .timezones import timezone_label
 
@@ -199,6 +199,7 @@ def provision_device(
     headless: bool = False,
     tracker: _StepTracker | None = None,
     dry_run: bool = False,
+    profile_name: str | None = None,
 ) -> bool | tuple[bool, _StepTracker, dict[str, str]]:
     """Run all 5 provisioning phases against a single device.
 
@@ -212,25 +213,33 @@ def provision_device(
     if dry_run:
         tracker._panel_title = f"Provision (Dry Run) — {tracker.device_label}"
     results: dict[str, str] = {"host": host, "username": username}
+    if profile_name:
+        results["profile"] = profile_name
+
+    resolved = resolve_profile(profile_name, config)
 
     if headless:
         success = _run_provisioning(
-            host, device, username, password, config, console,
+            host, device, username, password, resolved.config, console,
             tracker, results, skip_firmware, skip_reboot,
             headless=True, dry_run=dry_run,
+            resolved=resolved,
         )
         return success, tracker, results
 
     _clear()
     success = _run_provisioning(
-        host, device, username, password, config, console,
+        host, device, username, password, resolved.config, console,
         tracker, results, skip_firmware, skip_reboot,
         dry_run=dry_run,
+        resolved=resolved,
     )
     if dry_run:
-        _show_dry_run_results(console, tracker, results, success, config)
+        _show_dry_run_results(console, tracker, results, success, resolved.config,
+                              resolved=resolved)
     else:
-        _show_results(console, tracker, results, success, config)
+        _show_results(console, tracker, results, success, resolved.config,
+                      resolved=resolved)
     return success
 
 
@@ -247,6 +256,7 @@ def _run_provisioning(
     skip_reboot: bool,
     headless: bool = False,
     dry_run: bool = False,
+    resolved: ResolvedProfile | None = None,
 ) -> bool:
     """Execute all phases inside a Live display. Returns True on success."""
     model_name = ""
@@ -262,12 +272,12 @@ def _run_provisioning(
             return _run_dry_run_inner(
                 host, device, username, password, config, console,
                 tracker, results, skip_firmware, skip_reboot, pubkey_path,
-                headless=headless,
+                headless=headless, resolved=resolved,
             )
         return _run_provisioning_inner(
             host, device, username, password, config, console,
             tracker, results, skip_firmware, skip_reboot, pubkey_path,
-            headless=headless,
+            headless=headless, resolved=resolved,
         )
     finally:
         if _is_temp_key and pubkey_path and pubkey_path.exists():
@@ -287,6 +297,7 @@ def _run_provisioning_inner(
     skip_reboot: bool,
     pubkey_path: Path | None,
     headless: bool = False,
+    resolved: ResolvedProfile | None = None,
 ) -> bool:
     """Execute all phases inside a Live display. Returns True on success."""
     model_name = ""
@@ -346,25 +357,38 @@ def _run_provisioning_inner(
         current_date = now.strftime("%m-%d-%Y")
 
         commands: list[tuple[str, str]] = []
+        skipped = resolved.skipped if resolved else set()
         pubkey_basename = pubkey_path.name if pubkey_path else ""
-        if pubkey_basename:
+        if pubkey_basename and "pubkey_file" not in skipped:
             commands.append((
                 f"ADDPUBKEYTOUSER -N:{username} -K:{pubkey_basename}",
                 "Registering public key",
             ))
-        commands += [
-            (f"TIMEZONE {config.timezone}", "Setting timezone"),
-            (f"TIMEDATE {current_time} {current_date}", "Setting date/time"),
-            (f"SNTP SERVER:{config.ntp_server}", "Configuring NTP"),
-            ("SNTP SYNC", "Syncing time"),
-            (f"WEBPORT {config.web_port}", "Setting web port"),
-            (f"SECUREWEBPORT {config.secure_web_port}", "Setting secure web port"),
-            (f"SETUSERLOGINATTEMPTS {config.user_login_attempts}", "Login attempts"),
-            (f"SETUSERLOCKOUTTIME {config.user_lockout_time}", "Lockout time"),
-            (f"SETLOGINATTEMPTS {config.login_attempts}", "Console login attempts"),
-            (f"SETLOCKOUTTIME {config.lockout_time}", "Console lockout time"),
-            (f"FIPSMODE {config.fips_mode}", "Setting FIPS mode"),
+
+        # Build standard commands, skipping any excluded by the profile
+        _standard_commands: list[tuple[str, str, str]] = [
+            (f"TIMEZONE {config.timezone}", "Setting timezone", "timezone"),
+            (f"TIMEDATE {current_time} {current_date}", "Setting date/time", ""),
+            (f"SNTP SERVER:{config.ntp_server}", "Configuring NTP", "ntp_server"),
+            ("SNTP SYNC", "Syncing time", ""),
+            (f"WEBPORT {config.web_port}", "Setting web port", "web_port"),
+            (f"SECUREWEBPORT {config.secure_web_port}", "Setting secure web port", "secure_web_port"),
+            (f"SETUSERLOGINATTEMPTS {config.user_login_attempts}", "Login attempts", "user_login_attempts"),
+            (f"SETUSERLOCKOUTTIME {config.user_lockout_time}", "Lockout time", "user_lockout_time"),
+            (f"SETLOGINATTEMPTS {config.login_attempts}", "Console login attempts", "login_attempts"),
+            (f"SETLOCKOUTTIME {config.lockout_time}", "Console lockout time", "lockout_time"),
+            (f"FIPSMODE {config.fips_mode}", "Setting FIPS mode", "fips_mode"),
         ]
+        for cmd, desc, field_name in _standard_commands:
+            if field_name and field_name in skipped:
+                continue
+            commands.append((cmd, desc))
+
+        # Append extra commands from profile
+        if resolved and resolved.extra_commands:
+            for ec in resolved.extra_commands:
+                label = ec.label or ec.command
+                commands.append((ec.command, label))
 
         try:
             with CrestronSSH(host, username, password) as ssh:
@@ -397,6 +421,8 @@ def _run_provisioning_inner(
         if model_name:
             device.model = model_name
             detail = f"{model_name} — {detail}"
+        if resolved and resolved.name != "default":
+            detail += f" (profile: {resolved.name})"
         tracker.ok(2, detail)
         results["puf_version"] = current_puf_version
         live.update(tracker)
@@ -622,6 +648,7 @@ def _run_dry_run_inner(
     skip_reboot: bool,
     pubkey_path: Path | None,
     headless: bool = False,
+    resolved: ResolvedProfile | None = None,
 ) -> bool:
     """Execute a dry run: connect read-only, collect planned changes."""
     planned_commands: list[str] = []
@@ -681,24 +708,36 @@ def _run_dry_run_inner(
         live.update(tracker)
 
         now = datetime.now()
+        skipped = resolved.skipped if resolved else set()
         pubkey_basename = pubkey_path.name if pubkey_path else ""
-        if pubkey_basename:
+        if pubkey_basename and "pubkey_file" not in skipped:
             planned_commands.append(
                 f"ADDPUBKEYTOUSER -N:{username} -K:{pubkey_basename}"
             )
-        planned_commands += [
-            f"TIMEZONE {config.timezone}",
-            f"TIMEDATE {now.strftime('%H:%M:%S')} {now.strftime('%m-%d-%Y')}",
-            f"SNTP SERVER:{config.ntp_server}",
-            "SNTP SYNC",
-            f"WEBPORT {config.web_port}",
-            f"SECUREWEBPORT {config.secure_web_port}",
-            f"SETUSERLOGINATTEMPTS {config.user_login_attempts}",
-            f"SETUSERLOCKOUTTIME {config.user_lockout_time}",
-            f"SETLOGINATTEMPTS {config.login_attempts}",
-            f"SETLOCKOUTTIME {config.lockout_time}",
-            f"FIPSMODE {config.fips_mode}",
+
+        # Build standard commands, respecting profile skips
+        _standard_dry: list[tuple[str, str]] = [
+            (f"TIMEZONE {config.timezone}", "timezone"),
+            (f"TIMEDATE {now.strftime('%H:%M:%S')} {now.strftime('%m-%d-%Y')}", ""),
+            (f"SNTP SERVER:{config.ntp_server}", "ntp_server"),
+            ("SNTP SYNC", ""),
+            (f"WEBPORT {config.web_port}", "web_port"),
+            (f"SECUREWEBPORT {config.secure_web_port}", "secure_web_port"),
+            (f"SETUSERLOGINATTEMPTS {config.user_login_attempts}", "user_login_attempts"),
+            (f"SETUSERLOCKOUTTIME {config.user_lockout_time}", "user_lockout_time"),
+            (f"SETLOGINATTEMPTS {config.login_attempts}", "login_attempts"),
+            (f"SETLOCKOUTTIME {config.lockout_time}", "lockout_time"),
+            (f"FIPSMODE {config.fips_mode}", "fips_mode"),
         ]
+        for cmd, field_name in _standard_dry:
+            if field_name and field_name in skipped:
+                continue
+            planned_commands.append(cmd)
+
+        # Extra commands from profile
+        if resolved and resolved.extra_commands:
+            for ec in resolved.extra_commands:
+                planned_commands.append(ec.command)
         cmd_count = len(planned_commands)
 
         # Connect read-only to gather current state
@@ -763,6 +802,8 @@ def _run_dry_run_inner(
                 if model_name:
                     device.model = model_name
                     detail = f"{model_name} — {detail}"
+                if resolved and resolved.name != "default":
+                    detail += f" (profile: {resolved.name})"
                 tracker.ok(2, detail)
                 results["puf_version"] = current_puf_version
             except Exception as e:
@@ -872,6 +913,7 @@ def _show_results(
     results: dict[str, str],
     success: bool,
     config: Config,
+    resolved: ResolvedProfile | None = None,
 ) -> None:
     """Clear screen and display a results summary panel."""
     _clear()
@@ -902,6 +944,8 @@ def _show_results(
         model = results.get("model", "")
         info.add_row("Device:", f"{model} @ {host}" if model else host)
         info.add_row("Account:", results.get("username", ""))
+        if resolved and resolved.name != "default":
+            info.add_row("Profile:", resolved.name)
         info.add_row("Timezone:", timezone_label(config.timezone))
         info.add_row("NTP Server:", config.ntp_server)
         info.add_row("Web Port:", str(config.web_port))
@@ -1000,6 +1044,7 @@ def _show_dry_run_results(
     results: dict[str, str],
     success: bool,
     config: Config,
+    resolved: ResolvedProfile | None = None,
 ) -> None:
     """Display dry-run summary showing current vs planned configuration."""
     _clear()
@@ -1029,6 +1074,8 @@ def _show_dry_run_results(
     model = results.get("model", "")
     info.add_row("Device:", f"{model} @ {host}" if model else host)
     info.add_row("Account:", results.get("username", ""))
+    if resolved and resolved.name != "default":
+        info.add_row("Profile:", resolved.name)
     if results.get("puf_version"):
         info.add_row("Current PUF:", results["puf_version"])
     console.print(info)
@@ -1058,25 +1105,26 @@ def _show_dry_run_results(
                 current_values[k] = v
 
     # Build configuration diff table with smart comparison
-    diff_rows: list[tuple[str, str, str, str]] = [
+    skipped = resolved.skipped if resolved else set()
+    diff_rows: list[tuple[str, str, str, str, str]] = [
         ("Timezone", current_values.get("timezone", ""),
-         timezone_label(config.timezone), "timezone"),
+         timezone_label(config.timezone), "timezone", "timezone"),
         ("NTP Server", current_values.get("sntp", ""),
-         config.ntp_server, "sntp"),
+         config.ntp_server, "sntp", "ntp_server"),
         ("Web Port", current_values.get("web_port", ""),
-         str(config.web_port), "port"),
+         str(config.web_port), "port", "web_port"),
         ("Secure Web Port", current_values.get("secure_web_port", ""),
-         str(config.secure_web_port), "port"),
+         str(config.secure_web_port), "port", "secure_web_port"),
         ("FIPS Mode", current_values.get("fips_mode", ""),
-         config.fips_mode, "fips"),
+         config.fips_mode, "fips", "fips_mode"),
         ("User Login Attempts", current_values.get("user_login_attempts", ""),
-         str(config.user_login_attempts), "number"),
+         str(config.user_login_attempts), "number", "user_login_attempts"),
         ("User Lockout Time", current_values.get("user_lockout_time", ""),
-         config.user_lockout_time, "duration"),
+         config.user_lockout_time, "duration", "user_lockout_time"),
         ("Console Login Attempts", current_values.get("login_attempts", ""),
-         str(config.login_attempts), "number"),
+         str(config.login_attempts), "number", "login_attempts"),
         ("Console Lockout Time", current_values.get("lockout_time", ""),
-         config.lockout_time, "duration"),
+         config.lockout_time, "duration", "lockout_time"),
     ]
 
     if current_values:
@@ -1091,7 +1139,17 @@ def _show_dry_run_results(
         diff_table.add_column("Planned")
         diff_table.add_column("")
 
-        for label, current, planned, compare_type in diff_rows:
+        for label, current, planned, compare_type, field_name in diff_rows:
+            if field_name in skipped:
+                diff_table.add_row(
+                    label,
+                    f"[dim]{current}[/dim]" if current.strip() else "[dim]—[/dim]",
+                    "",
+                    "",
+                    "[dim]skipped[/dim]",
+                )
+                continue
+
             matches = _compare_setting(current, planned, compare_type)
             if not current.strip():
                 arrow = "→"

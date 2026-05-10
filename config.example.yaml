@@ -50,3 +50,36 @@ firmware_urls:
 discovery:
   timeout: 5 # Seconds to listen for responses
   broadcast_count: 3 # Number of broadcast packets to send
+
+# ─── Configuration Profiles ───────────────────────────────────────────────
+# Profiles let you customise provisioning per device type.
+# Top-level settings above act as the "default" profile.
+# Each profile can:
+#   - Override a setting with a new value
+#   - Set a setting to false to skip that command entirely
+#   - Add custom commands via extra_commands
+#   - Auto-match devices by model name using glob patterns
+#
+# Omitted settings inherit from the defaults above.
+profiles:
+  # Example: touch panels don't need web port or FIPS changes
+  # touch-panels:
+  #   models: ["TSW-*", "TS-*"]
+  #   web_port: false
+  #   secure_web_port: false
+  #   fips_mode: false
+  #   extra_commands:
+  #     - command: "PROGCOMMENTS OFF"
+  #       label: "Disable program comments"
+
+  # Example: locked-down processors with stricter security
+  # locked-down:
+  #   models: ["CP4*", "MC4*", "PRO4*"]
+  #   fips_mode: "ON"
+  #   user_login_attempts: 3
+  #   user_lockout_time: "30m"
+  #   login_attempts: 5
+  #   lockout_time: "1h"
+  #   extra_commands:
+  #     - command: "SSHD ROOTALIAS OFF"
+  #       label: "Disable root alias"

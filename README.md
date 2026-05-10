@@ -99,6 +99,36 @@ Copy `config.example.yaml` to get started. Key settings:
 | `secure_web_port` | `8443`                     | Secure web server port                                                   |
 | `firmware_urls`   | _(empty)_                  | Per-model firmware download URLs                                         |
 
+### Configuration Profiles
+
+Profiles let you customise provisioning for different device types. The top-level settings act as the default; named profiles override specific fields.
+
+```yaml
+profiles:
+  touch-panels:
+    models: ["TSW-*", "TS-*"]    # Glob patterns for auto-matching
+    web_port: false               # false = skip this command
+    secure_web_port: false
+    fips_mode: false
+    extra_commands:                # Custom commands after standard config
+      - command: "PROGCOMMENTS OFF"
+        label: "Disable program comments"
+
+  locked-down:
+    models: ["CP4*", "MC4*"]
+    fips_mode: "ON"               # Override a value
+    user_login_attempts: 3
+    user_lockout_time: "30m"
+```
+
+Key concepts:
+- **`false`** = skip this command entirely (it won't be sent to the device)
+- **Omitted** = inherit the default value
+- **`models`** = glob patterns matched against `device.model` for auto-suggestion
+- **`extra_commands`** = custom CLI commands run after standard phase 3 configuration
+
+Profiles are managed interactively via **Settings → Manage Profiles**, or edited directly in `config.yaml`.
+
 ## Files
 
 | Path                            | Purpose                                                      |
