@@ -341,7 +341,7 @@ def main() -> None:
         elif choice == "program":
             config = _flow_upload_program(config)
         elif choice == "restore":
-            _flow_restore()
+            _flow_restore(config)
         elif choice == "fw_audit":
             _flow_firmware_audit(config)
         elif choice == "certs":
@@ -433,7 +433,7 @@ def _flow_discover(config: Config) -> Config:
     selected_devices = [devices[i] for i in selected_indices]
 
     # Get credentials (all actions need them)
-    creds = _prompt_credentials()
+    creds = _prompt_credentials(config)
     if not creds:
         return config
     username, password = creds
@@ -593,9 +593,9 @@ def _flow_discover(config: Config) -> Config:
                              dry_run=True, profile_name=effective_profile)
         elif action == "program":
             host = dev.ip or dev.hostname
-            upload_program(host, username, password, program_path, slot, console)
+            upload_program(host, username, password, program_path, slot, console, use_key_auth=config.ssh_key_auth)
         elif action == "restore":
-            restore_device(dev, username, password, console)
+            restore_device(dev, username, password, console, use_key_auth=config.ssh_key_auth)
         elif action == "iptable":
             _flow_ip_table(config, host=dev.ip or dev.hostname,
                            username=username, password=password)
@@ -682,12 +682,14 @@ def _run_parallel(
             result = upload_program(
                 host, username, password, program_path, slot, console,
                 headless=True, tracker=dr.tracker,
+                use_key_auth=config.ssh_key_auth,
             )
             dr.success = result[0]  # type: ignore[index]
         elif action == "restore":
             result = restore_device(
                 dev, username, password, console,
                 headless=True, tracker=dr.tracker,
+                use_key_auth=config.ssh_key_auth,
             )
             dr.success = result[0]  # type: ignore[index]
 
@@ -804,7 +806,7 @@ def _flow_manual_setup(config: Config) -> None:
     if not host:
         return
 
-    creds = _prompt_credentials()
+    creds = _prompt_credentials(config)
     if not creds:
         return
     username, password = creds
@@ -955,7 +957,7 @@ def _flow_batch_provision(config: Config) -> Config:
         need_shared = any(not entry.get("username") for entry in valid_entries)
         if need_shared:
             console.print("[dim]Devices without credentials will use shared credentials.[/dim]")
-            creds = _prompt_credentials()
+            creds = _prompt_credentials(config)
             if not creds:
                 return config
             shared_user, shared_pass = creds
@@ -963,7 +965,7 @@ def _flow_batch_provision(config: Config) -> Config:
             shared_user, shared_pass = "", ""
     else:
         console.print("[dim]Enter credentials to use for all devices.[/dim]")
-        creds = _prompt_credentials()
+        creds = _prompt_credentials(config)
         if not creds:
             return config
         shared_user, shared_pass = creds
@@ -1109,7 +1111,7 @@ def _flow_upload_program(config: Config) -> Config:
     config.last_program_file = program_path
     save_config(config)
 
-    upload_program(host, username, password, program_path, slot, console)
+    upload_program(host, username, password, program_path, slot, console, use_key_auth=config.ssh_key_auth)
     _pause()
     return config
 
@@ -1119,7 +1121,7 @@ def _flow_upload_program(config: Config) -> Config:
 # --------------------------------------------------------------------------- #
 
 
-def _flow_restore() -> None:
+def _flow_restore(config: Config) -> None:
     """Restore a device to factory defaults (initialize + restore)."""
     _header("Restore & Erase Device")
     console.print("[yellow][WARN][/yellow] This will erase all settings and programs "
@@ -1147,7 +1149,7 @@ def _flow_restore() -> None:
         return
 
     device = Device(ip=host)
-    restore_device(device, username, password, console)
+    restore_device(device, username, password, console, use_key_auth=config.ssh_key_auth)
     _pause()
 
 
@@ -1212,7 +1214,7 @@ def _flow_firmware_audit(config: Config) -> None:
         return
 
     if ready_devices:
-        creds = _prompt_credentials()
+        creds = _prompt_credentials(config)
         if not creds:
             return
         username, password = creds
@@ -1248,7 +1250,7 @@ def _flow_firmware_audit(config: Config) -> None:
         else:
             # SSH in to get the full PUF version from VER -V
             try:
-                with CrestronSSH(host, username, password) as ssh:
+                with CrestronSSH(host, username, password, use_key_auth=config.ssh_key_auth) as ssh:
                     if not dev.model:
                         dev.model = ssh.model
                     ver_output = ssh.send_command("VER -V", timeout=20)
@@ -1588,14 +1590,14 @@ def _flow_cert_status(config: Config) -> None:
     if not host:
         return
 
-    creds = _prompt_credentials()
+    creds = _prompt_credentials(config)
     if not creds:
         return
     username, password = creds
 
     with console.status("Reading certificate info…", spinner="dots"):
         try:
-            with CrestronSSH(host, username, password) as ssh:
+            with CrestronSSH(host, username, password, use_key_auth=config.ssh_key_auth) as ssh:
                 ssl_output = ssh.send_command("SSL", timeout=10)
                 ws_certs = ssh.send_command("CERTIFICATE LISTN WEBSERVER", timeout=10)
                 root_certs = ssh.send_command("CERTIFICATE LISTN ROOT", timeout=10)
@@ -1648,7 +1650,7 @@ def _flow_generate_csr(config: Config) -> None:
     if not host:
         return
 
-    creds = _prompt_credentials()
+    creds = _prompt_credentials(config)
     if not creds:
         return
     username, password = creds
@@ -1729,7 +1731,7 @@ def _flow_generate_csr(config: Config) -> None:
 
     # Execute on device
     try:
-        with CrestronSSH(host, username, password) as ssh:
+        with CrestronSSH(host, username, password, use_key_auth=config.ssh_key_auth) as ssh:
             with console.status("Generating CSR on device…", spinner="dots"):
                 output = ssh.send_command(cmd, timeout=30)
             console.print(output.strip())
@@ -1754,6 +1756,7 @@ def _flow_generate_csr(config: Config) -> None:
             result = sftp_download(
                 host, username, password,
                 "/user/csr.pem", save_dir, console=console,
+                use_key_auth=config.ssh_key_auth,
             )
             if result:
                 console.print(f"[green][OK][/green] CSR saved: {result}")
@@ -1772,7 +1775,7 @@ def _flow_install_cert(config: Config) -> None:
     if not host:
         return
 
-    creds = _prompt_credentials()
+    creds = _prompt_credentials(config)
     if not creds:
         return
     username, password = creds
@@ -1832,7 +1835,7 @@ def _flow_install_cert(config: Config) -> None:
     try:
         # Upload cert file
         console.print("\n[cyan]Uploading certificate file…[/cyan]")
-        if not sftp_upload(host, username, password, str(cert_file), "/user", console):
+        if not sftp_upload(host, username, password, str(cert_file), "/user", console, use_key_auth=config.ssh_key_auth):
             _pause()
             return
 
@@ -1841,17 +1844,17 @@ def _flow_install_cert(config: Config) -> None:
             inter_file = Path(inter_path).expanduser()
             if inter_file.is_file():
                 console.print("\n[cyan]Uploading intermediate CA…[/cyan]")
-                sftp_upload(host, username, password, str(inter_file), "/user", console)
+                sftp_upload(host, username, password, str(inter_file), "/user", console, use_key_auth=config.ssh_key_auth)
 
         # Upload root CA if provided
         if root_path:
             root_file = Path(root_path).expanduser()
             if root_file.is_file():
                 console.print("\n[cyan]Uploading root CA…[/cyan]")
-                sftp_upload(host, username, password, str(root_file), "/user", console)
+                sftp_upload(host, username, password, str(root_file), "/user", console, use_key_auth=config.ssh_key_auth)
 
         # Install via SSH commands
-        with CrestronSSH(host, username, password) as ssh:
+        with CrestronSSH(host, username, password, use_key_auth=config.ssh_key_auth) as ssh:
             # Install root CA first (if provided)
             if root_path:
                 root_file = Path(root_path).expanduser()
@@ -1905,13 +1908,13 @@ def _flow_tls_settings(config: Config) -> None:
     if not host:
         return
 
-    creds = _prompt_credentials()
+    creds = _prompt_credentials(config)
     if not creds:
         return
     username, password = creds
 
     try:
-        with CrestronSSH(host, username, password) as ssh:
+        with CrestronSSH(host, username, password, use_key_auth=config.ssh_key_auth) as ssh:
             # Read current settings
             with console.status("Reading TLS settings…", spinner="dots"):
                 ssl_out = ssh.send_command("SSL", timeout=10)
@@ -2050,21 +2053,21 @@ def _flow_bulk_deploy_cert(
         host = dev.ip or dev.hostname
         try:
             # Upload files
-            if not sftp_upload(host, username, password, str(cert_file), "/user"):
+            if not sftp_upload(host, username, password, str(cert_file), "/user", use_key_auth=config.ssh_key_auth):
                 return host, False, "SFTP upload failed"
 
             if inter_path:
                 inter = Path(inter_path).expanduser()
                 if inter.is_file():
-                    sftp_upload(host, username, password, str(inter), "/user")
+                    sftp_upload(host, username, password, str(inter), "/user", use_key_auth=config.ssh_key_auth)
 
             if root_path:
                 root = Path(root_path).expanduser()
                 if root.is_file():
-                    sftp_upload(host, username, password, str(root), "/user")
+                    sftp_upload(host, username, password, str(root), "/user", use_key_auth=config.ssh_key_auth)
 
             # Install via SSH
-            with CrestronSSH(host, username, password) as ssh:
+            with CrestronSSH(host, username, password, use_key_auth=config.ssh_key_auth) as ssh:
                 if root_path:
                     root = Path(root_path).expanduser()
                     if root.is_file():
@@ -2374,14 +2377,14 @@ def _flow_ip_table(config: Config, host: str | None = None,
             return config
 
     if not username or not password:
-        creds = _prompt_credentials()
+        creds = _prompt_credentials(config)
         if not creds:
             return config
         username, password = creds
 
     # Connect once, keep alive for the session
     try:
-        ssh = CrestronSSH(host, username, password)
+        ssh = CrestronSSH(host, username, password, use_key_auth=config.ssh_key_auth)
         ssh.connect()
     except Exception as e:
         console.print(f"[red][FAIL][/red] Connection failed: {e}")
@@ -2450,6 +2453,8 @@ def _flow_settings(config: Config) -> Config:
         console.print(f"  FIPS Mode:           {config.fips_mode}")
         console.print(f"  Firmware URLs:       {len(config.firmware_urls)} configured")
         console.print(f"  Profiles:            {len(config.profiles)} configured")
+        console.print(f"  Default Username:    {config.default_username or '(not set)'}")
+        console.print(f"  SSH Key Auth:        {'enabled' if config.ssh_key_auth else 'disabled'}")
         console.print()
 
         action = questionary.select(
@@ -2491,6 +2496,8 @@ def _edit_setting(config: Config) -> Config:
             questionary.Choice("Web Port", value="web_port"),
             questionary.Choice("Secure Web Port", value="secure_web_port"),
             questionary.Choice("FIPS Mode", value="fips_mode"),
+            questionary.Choice("Default Username", value="default_username"),
+            questionary.Choice("SSH Key Auth", value="ssh_key_auth"),
             questionary.Choice("Cancel", value="cancel"),
         ],
     ).ask()
@@ -2500,6 +2507,12 @@ def _edit_setting(config: Config) -> Config:
 
     if field == "timezone":
         return _pick_timezone(config)
+
+    if field == "ssh_key_auth":
+        config.ssh_key_auth = not config.ssh_key_auth
+        state = "enabled" if config.ssh_key_auth else "disabled"
+        console.print(f"[cyan][INFO][/cyan] SSH key auth {state}")
+        return config
 
     current = getattr(config, field)
     new_value = questionary.text(
@@ -2821,11 +2834,29 @@ def _delete_profile(config: Config) -> Config:
 # --------------------------------------------------------------------------- #
 
 
-def _prompt_credentials() -> tuple[str, str] | None:
-    """Prompt for admin username and password."""
-    username = questionary.text("Admin username:").ask()
+def _prompt_credentials(
+    config: Config | None = None,
+) -> tuple[str, str] | None:
+    """Prompt for admin username and password.
+
+    If config has a default_username, pre-fills it.
+    If config.ssh_key_auth is enabled, password is optional (SSH keys tried first).
+    """
+    default_user = config.default_username if config else ""
+    use_keys = config.ssh_key_auth if config else False
+
+    username = questionary.text(
+        "Admin username:", default=default_user,
+    ).ask()
     if not username:
         return None
+
+    if use_keys:
+        use_password = questionary.confirm(
+            "Enter password? (No = try SSH key auth only)", default=False,
+        ).ask()
+        if not use_password:
+            return username, ""
 
     password = questionary.password("Admin password:").ask()
     if not password:

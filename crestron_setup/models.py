@@ -222,3 +222,5 @@ class Config:
     profiles: dict[str, Profile] = field(default_factory=dict)
     csr_defaults: CsrDefaults = field(default_factory=CsrDefaults)
     certificates: CertificateConfig = field(default_factory=CertificateConfig)
+    default_username: str = ""
+    ssh_key_auth: bool = True

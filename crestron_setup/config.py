@@ -187,6 +187,8 @@ def load_config() -> Config:
         profiles=_parse_profiles(data.get("profiles")),
         csr_defaults=csr_defaults,
         certificates=certificates,
+        default_username=data.get("default_username", ""),
+        ssh_key_auth=bool(data.get("ssh_key_auth", True)),
     )
 
 
@@ -225,6 +227,10 @@ def save_config(config: Config) -> Path:
 
     if config.firmware_server:
         data["firmware_server"] = config.firmware_server
+
+    if config.default_username:
+        data["default_username"] = config.default_username
+    data["ssh_key_auth"] = config.ssh_key_auth
 
     if config.profiles:
         data["profiles"] = _serialize_profiles(config.profiles)

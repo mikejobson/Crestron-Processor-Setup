@@ -28,12 +28,14 @@ CONNECT_TIMEOUT = 10
 class CrestronSSH:
     """Manage an SSH shell session to a Crestron processor."""
 
-    def __init__(self, host: str, username: str, password: str,
-                 console: Console | None = None):
+    def __init__(self, host: str, username: str, password: str = "",
+                 console: Console | None = None,
+                 use_key_auth: bool = False):
         self.host = host
         self.username = username
         self.password = password
         self.console = console
+        self.use_key_auth = use_key_auth
         self.client: paramiko.SSHClient | None = None
         self.channel: paramiko.Channel | None = None
         self.model: str = ""
@@ -42,18 +44,14 @@ class CrestronSSH:
     def connect(self, timeout: int = CONNECT_TIMEOUT) -> str:
         """Connect and detect the processor model from the prompt.
 
+        If use_key_auth is True, tries SSH agent and key files first.
+        Falls back to password authentication if key auth fails.
         Returns the model name (e.g., 'CP4', 'MC4').
         """
         self.client = paramiko.SSHClient()
         self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        self.client.connect(
-            self.host,
-            username=self.username,
-            password=self.password,
-            timeout=timeout,
-            look_for_keys=False,
-            allow_agent=False,
-        )
+        _connect_client(self.client, self.host, self.username, self.password,
+                        timeout=timeout, use_key_auth=self.use_key_auth)
         self.channel = self.client.invoke_shell(width=200, height=50)
         self.channel.settimeout(DEFAULT_TIMEOUT)
 
@@ -282,9 +280,35 @@ def _read_until(channel: paramiko.Channel, markers: list[bytes],
     return buf
 
 
+def _connect_client(
+    client: paramiko.SSHClient,
+    host: str,
+    username: str,
+    password: str = "",
+    timeout: int = CONNECT_TIMEOUT,
+    use_key_auth: bool = False,
+) -> None:
+    """Connect a paramiko SSHClient, trying key auth first if enabled."""
+    if use_key_auth:
+        try:
+            client.connect(
+                host, username=username, timeout=timeout,
+                look_for_keys=True, allow_agent=True,
+            )
+            return
+        except (paramiko.AuthenticationException, Exception):
+            pass  # Fall through to password auth
+
+    client.connect(
+        host, username=username, password=password,
+        timeout=timeout, look_for_keys=False, allow_agent=False,
+    )
+
+
 def sftp_upload(host: str, username: str, password: str,
                 local_path: str, remote_dir: str,
-                console: Console | None = None) -> bool:
+                console: Console | None = None,
+                use_key_auth: bool = False) -> bool:
     """Upload a file via SFTP to the processor.
 
     Returns True on success.
@@ -300,10 +324,8 @@ def sftp_upload(host: str, username: str, password: str,
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     try:
-        client.connect(
-            host, username=username, password=password,
-            timeout=CONNECT_TIMEOUT, look_for_keys=False, allow_agent=False,
-        )
+        _connect_client(client, host, username, password,
+                        use_key_auth=use_key_auth)
         sftp = client.open_sftp()
 
         if console:
@@ -324,15 +346,14 @@ def sftp_upload(host: str, username: str, password: str,
 
 
 def check_ssh_ready(host: str, username: str, password: str,
-                    timeout: int = 5) -> bool:
+                    timeout: int = 5,
+                    use_key_auth: bool = False) -> bool:
     """Quick check if SSH is accepting connections and login works."""
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        client.connect(
-            host, username=username, password=password,
-            timeout=timeout, look_for_keys=False, allow_agent=False,
-        )
+        _connect_client(client, host, username, password,
+                        timeout=timeout, use_key_auth=use_key_auth)
         client.close()
         return True
     except Exception:
@@ -341,7 +362,8 @@ def check_ssh_ready(host: str, username: str, password: str,
 
 def sftp_download(host: str, username: str, password: str,
                   remote_path: str, local_dir: str,
-                  console: Console | None = None) -> Path | None:
+                  console: Console | None = None,
+                  use_key_auth: bool = False) -> Path | None:
     """Download a file via SFTP from the processor.
 
     Returns the local Path on success, or None on failure.
@@ -355,10 +377,8 @@ def sftp_download(host: str, username: str, password: str,
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     try:
-        client.connect(
-            host, username=username, password=password,
-            timeout=CONNECT_TIMEOUT, look_for_keys=False, allow_agent=False,
-        )
+        _connect_client(client, host, username, password,
+                        use_key_auth=use_key_auth)
         sftp = client.open_sftp()
 
         if console:

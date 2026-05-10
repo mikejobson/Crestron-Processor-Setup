@@ -2,6 +2,17 @@
 # Copy to ~/.config/crestron-setup/config.yaml (macOS/Linux)
 #       or %APPDATA%\crestron-setup\config.yaml (Windows)
 
+# ─── SSH Connection ─────────────────────────────────────────────────────────
+# Default username for SSH connections (pre-filled in prompts, leave blank to always ask)
+# default_username: "admin"
+
+# Try SSH key authentication before prompting for password (default: true)
+# Uses SSH agent keys (macOS Keychain, ssh-agent, 1Password, etc.) and ~/.ssh/ key files.
+# If key auth fails, falls back to password prompt automatically.
+ssh_key_auth: true
+
+# ─── Provisioning ──────────────────────────────────────────────────────────
+
 # Timezone ID to set on processors (use TIMEZONE LIST on a processor to see options)
 timezone: "33" # 33 = GMT Standard Time
 

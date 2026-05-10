@@ -311,7 +311,8 @@ def _run_provisioning_inner(
         live.update(tracker)
 
         with _quiet_ssh():
-            login_ok = not device.is_first_boot and _try_login(host, username, password)
+            login_ok = not device.is_first_boot and _try_login(
+                host, username, password, use_key_auth=config.ssh_key_auth)
 
         if not login_ok:
             tracker.details[0] = "Creating account…"
@@ -320,7 +321,7 @@ def _run_provisioning_inner(
                 created = CrestronFirstBoot.try_create_account(host, username, password)
             if created:
                 tracker.ok(0, f"Account '{username}' created")
-            elif _try_login(host, username, password):
+            elif _try_login(host, username, password, use_key_auth=config.ssh_key_auth):
                 tracker.ok(0, f"Account '{username}' already exists")
             else:
                 tracker.fail(0, "Cannot create account or log in")
@@ -339,7 +340,7 @@ def _run_provisioning_inner(
         if not pubkey_path:
             tracker.skip(1, "Key not found")
         else:
-            if sftp_upload(host, username, password, str(pubkey_path), "/user"):
+            if sftp_upload(host, username, password, str(pubkey_path), "/user", use_key_auth=config.ssh_key_auth):
                 tracker.ok(1, pubkey_path.name)
             else:
                 tracker.fail(1, "Upload failed")
@@ -391,7 +392,7 @@ def _run_provisioning_inner(
                 commands.append((ec.command, label))
 
         try:
-            with CrestronSSH(host, username, password) as ssh:
+            with CrestronSSH(host, username, password, use_key_auth=config.ssh_key_auth) as ssh:
                 model_name = ssh.model
                 results["model"] = model_name
 
@@ -436,7 +437,7 @@ def _run_provisioning_inner(
             tracker.start(3, "Enabling DHCP…")
             live.update(tracker)
             try:
-                with CrestronSSH(host, username, password) as ssh:
+                with CrestronSSH(host, username, password, use_key_auth=config.ssh_key_auth) as ssh:
                     if net.hostname:
                         ssh.send_command(f"HOSTNAME {net.hostname}")
                     ssh.send_command("DHCP 0 ON /now")
@@ -459,7 +460,7 @@ def _run_provisioning_inner(
             tracker.start(3, "Setting static IP…")
             live.update(tracker)
             try:
-                with CrestronSSH(host, username, password) as ssh:
+                with CrestronSSH(host, username, password, use_key_auth=config.ssh_key_auth) as ssh:
                     # Set IP details first (without /now), then disable DHCP
                     # last with /now so all changes activate together.
                     net_cmds = []
@@ -513,7 +514,7 @@ def _run_provisioning_inner(
             live.update(tracker)
 
             try:
-                with CrestronSSH(host, username, password) as ssh:
+                with CrestronSSH(host, username, password, use_key_auth=config.ssh_key_auth) as ssh:
                     ssh.channel.sendall(b"REBOOT\r")  # type: ignore[union-attr]
                     time.sleep(1)
             except Exception:
@@ -544,7 +545,7 @@ def _run_provisioning_inner(
                     ping_ok = _ping(host)
                     if ping_ok:
                         with _quiet_ssh():
-                            if check_ssh_ready(host, username, password, timeout=5):
+                            if check_ssh_ready(host, username, password, timeout=5, use_key_auth=config.ssh_key_auth):
                                 came_back = True
                                 break
                     next_ping_at = elapsed + poll_interval
@@ -595,13 +596,14 @@ def _run_provisioning_inner(
                         tracker.details[5] = f"Uploading {fw_path.name}…"
                         live.update(tracker)
                         if sftp_upload(
-                            host, username, password, str(fw_path), "/firmware"
+                            host, username, password, str(fw_path), "/firmware",
+                            use_key_auth=config.ssh_key_auth,
                         ):
                             tracker.details[5] = "Installing firmware…"
                             live.update(tracker)
                             try:
                                 with _quiet_ssh():
-                                    with CrestronSSH(host, username, password) as ssh:
+                                    with CrestronSSH(host, username, password, use_key_auth=config.ssh_key_auth) as ssh:
                                         ssh.send_command("PUF", timeout=60)
                             except Exception:
                                 pass  # PUF triggers reboot, connection drops
@@ -613,13 +615,14 @@ def _run_provisioning_inner(
                     tracker.details[5] = f"Uploading {fw_path.name}…"
                     live.update(tracker)
                     if sftp_upload(
-                        host, username, password, str(fw_path), "/firmware"
+                        host, username, password, str(fw_path), "/firmware",
+                        use_key_auth=config.ssh_key_auth,
                     ):
                         tracker.details[5] = "Installing firmware…"
                         live.update(tracker)
                         try:
                             with _quiet_ssh():
-                                with CrestronSSH(host, username, password) as ssh:
+                                with CrestronSSH(host, username, password, use_key_auth=config.ssh_key_auth) as ssh:
                                     ssh.send_command("PUF", timeout=60)
                         except Exception:
                             pass  # PUF triggers reboot, connection drops
@@ -668,7 +671,7 @@ def _run_dry_run_inner(
 
         with _quiet_ssh():
             login_ok = not device.is_first_boot and _try_login(
-                host, username, password
+                host, username, password, use_key_auth=config.ssh_key_auth,
             )
 
         if device.is_first_boot:
@@ -744,7 +747,7 @@ def _run_dry_run_inner(
         if not device.is_first_boot and login_ok:
             try:
                 with _quiet_ssh():
-                    with CrestronSSH(host, username, password) as ssh:
+                    with CrestronSSH(host, username, password, use_key_auth=config.ssh_key_auth) as ssh:
                         model_name = ssh.model
                         results["model"] = model_name
 
@@ -1223,6 +1226,7 @@ def restore_device(
     console: Console,
     headless: bool = False,
     tracker: _StepTracker | None = None,
+    use_key_auth: bool = False,
 ) -> bool | tuple[bool, _StepTracker]:
     """Initialize and restore a device to factory defaults.
 
@@ -1235,11 +1239,13 @@ def restore_device(
         tracker._panel_title = f"Restore & Erase {host}"
 
     if headless:
-        success = _run_restore(host, username, password, console, tracker, headless=True)
+        success = _run_restore(host, username, password, console, tracker,
+                               headless=True, use_key_auth=use_key_auth)
         return success, tracker
 
     _clear()
-    success = _run_restore(host, username, password, console, tracker)
+    success = _run_restore(host, username, password, console, tracker,
+                           use_key_auth=use_key_auth)
     _show_restore_results(console, tracker, host, success)
     return success
 
@@ -1251,6 +1257,7 @@ def _run_restore(
     console: Console,
     tracker: _StepTracker,
     headless: bool = False,
+    use_key_auth: bool = False,
 ) -> bool:
     """Execute initialize/restore phases inside a Live display."""
 
@@ -1263,7 +1270,7 @@ def _run_restore(
 
         try:
             with _quiet_ssh():
-                with CrestronSSH(host, username, password) as ssh:
+                with CrestronSSH(host, username, password, use_key_auth=use_key_auth) as ssh:
                     tracker.details[0] = "Sending initialize command…"
                     live.update(tracker)
                     ssh.channel.sendall(b"initialize -y\r")  # type: ignore[union-attr]
@@ -1281,7 +1288,8 @@ def _run_restore(
         tracker.start(1, "Waiting for processor to go offline…")
         live.update(tracker)
 
-        if not _wait_for_reboot(host, username, password, tracker, 1, live):
+        if not _wait_for_reboot(host, username, password, tracker, 1, live,
+                                use_key_auth=use_key_auth):
             return False
 
         # ── Phase 3: Restore ──────────────────────────────────────────
@@ -1290,7 +1298,7 @@ def _run_restore(
 
         try:
             with _quiet_ssh():
-                with CrestronSSH(host, username, password) as ssh:
+                with CrestronSSH(host, username, password, use_key_auth=use_key_auth) as ssh:
                     tracker.details[2] = "Sending restore command…"
                     live.update(tracker)
                     ssh.channel.sendall(b"restore -y\r")  # type: ignore[union-attr]
@@ -1308,7 +1316,8 @@ def _run_restore(
         tracker.start(3, "Waiting for processor to go offline…")
         live.update(tracker)
 
-        if not _wait_for_reboot(host, username, password, tracker, 3, live, ping_only=True):
+        if not _wait_for_reboot(host, username, password, tracker, 3, live,
+                                ping_only=True, use_key_auth=use_key_auth):
             return False
 
         time.sleep(1)
@@ -1324,6 +1333,7 @@ def _wait_for_reboot(
     phase: int,
     live: Live,
     ping_only: bool = False,
+    use_key_auth: bool = False,
 ) -> bool:
     """Wait for a device to reboot and come back online.
 
@@ -1362,7 +1372,8 @@ def _wait_for_reboot(
                     came_back = True
                     break
                 with _quiet_ssh():
-                    if check_ssh_ready(host, username, password, timeout=5):
+                    if check_ssh_ready(host, username, password, timeout=5,
+                                       use_key_auth=use_key_auth):
                         came_back = True
                         break
             next_ping_at = elapsed + poll_interval
@@ -1414,9 +1425,11 @@ def _show_restore_results(
     console.print()
 
 
-def _try_login(host: str, username: str, password: str) -> bool:
+def _try_login(host: str, username: str, password: str,
+               use_key_auth: bool = False) -> bool:
     """Quick SSH login test."""
-    return check_ssh_ready(host, username, password, timeout=5)
+    return check_ssh_ready(host, username, password, timeout=5,
+                           use_key_auth=use_key_auth)
 
 
 def _ping(host: str) -> bool:
@@ -1454,6 +1467,7 @@ def upload_program(
     console: Console,
     headless: bool = False,
     tracker: _StepTracker | None = None,
+    use_key_auth: bool = False,
 ) -> bool | tuple[bool, _StepTracker]:
     """Upload a program file to a processor and load it.
 
@@ -1481,7 +1495,7 @@ def upload_program(
         if not local.exists():
             tracker.fail(0, f"File not found: {local}")
             live.update(tracker)
-        elif not sftp_upload(host, username, password, str(local), remote_dir):
+        elif not sftp_upload(host, username, password, str(local), remote_dir, use_key_auth=use_key_auth):
             tracker.fail(0, "Upload failed")
             live.update(tracker)
         else:
@@ -1493,7 +1507,7 @@ def upload_program(
             live.update(tracker)
 
             try:
-                with CrestronSSH(host, username, password) as ssh:
+                with CrestronSSH(host, username, password, use_key_auth=use_key_auth) as ssh:
                     output = ssh.send_command(f"PROGLOAD -P:{slot_str}", timeout=30)
                     tracker.ok(1, f"Slot {slot_str} loaded")
                     success = True

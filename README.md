@@ -103,6 +103,26 @@ Copy `config.example.yaml` to get started. Key settings:
 | `secure_web_port` | `8443`                     | Secure web server port                                                   |
 | `firmware_urls`   | _(empty)_                  | Per-model firmware download URLs                                         |
 | `firmware_server` | _(empty)_                  | Firmware server API base URL (see below)                                 |
+| `default_username`| _(empty)_                  | Pre-filled username for SSH connection prompts                           |
+| `ssh_key_auth`    | `true`                     | Try SSH key auth (agent + key files) before prompting for password        |
+
+### SSH Key Authentication
+
+When `ssh_key_auth` is enabled (default), the tool tries key-based authentication before asking for a password. This works with:
+
+- **SSH agent** — macOS Keychain, ssh-agent, 1Password, etc.
+- **Key files** — `~/.ssh/id_rsa`, `~/.ssh/id_ed25519`, etc.
+
+Since provisioning already uploads public keys to devices via `ADDPUBKEYTOUSER`, subsequent connections can authenticate automatically — no password needed.
+
+Set `default_username` in your config to skip the username prompt too:
+
+```yaml
+default_username: "mike"
+ssh_key_auth: true
+```
+
+When connecting, you'll be asked whether to enter a password or use key auth only. If key auth fails, the tool falls back to password authentication.
 
 ### Firmware Server API
 
