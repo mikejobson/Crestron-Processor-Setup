@@ -877,10 +877,39 @@ def _flow_firmware_audit(config: Config) -> None:
         return
 
     # Need credentials to read full PUF version via VER -V
-    creds = _prompt_credentials()
-    if not creds:
+    # Check for first-boot devices first
+    console.print("Checking first-boot state…")
+    first_boot_devices: list[Device] = []
+    ready_devices: list[Device] = []
+    for dev in devices:
+        dev.is_first_boot = CrestronFirstBoot.check_first_boot(dev.ip)
+        if dev.is_first_boot:
+            first_boot_devices.append(dev)
+        else:
+            ready_devices.append(dev)
+
+    if first_boot_devices:
+        names = ", ".join(d.ip for d in first_boot_devices)
+        console.print(
+            f"\n[yellow][WARN][/yellow] {len(first_boot_devices)} device(s) are in "
+            f"first-boot mode ({names}).\n"
+            "These have no credentials configured and will be shown with the "
+            "discovery version only.\n"
+            "Run [bold]Provision[/bold] first to create an account.\n"
+        )
+
+    if not ready_devices and not first_boot_devices:
+        console.print("[dim]No devices to audit.[/dim]")
+        _pause()
         return
-    username, password = creds
+
+    if ready_devices:
+        creds = _prompt_credentials()
+        if not creds:
+            return
+        username, password = creds
+    else:
+        username, password = "", ""
 
     console.print()
     console.print(f"[cyan][INFO][/cyan] {len(devices)} device(s) found. Reading firmware versions…")
@@ -899,27 +928,36 @@ def _flow_firmware_audit(config: Config) -> None:
         host = dev.ip or dev.hostname
         result = _AuditResult(device=dev)
 
-        # SSH in to get the full PUF version from VER -V
-        try:
-            with CrestronSSH(host, username, password) as ssh:
-                if not dev.model:
-                    dev.model = ssh.model
-                ver_output = ssh.send_command("VER -V", timeout=20)
-                for line in ver_output.splitlines():
-                    if "PUF:" in line.upper() and "PUFEXEC" not in line.upper():
-                        m = re.search(r"PUF:\s*([\d.]+)", line, re.IGNORECASE)
-                        if m:
-                            result.current_version = m.group(1)
-                            break
-        except Exception as e:
-            # Fall back to discovery version if SSH fails
-            if dev.firmware_version:
-                result.current_version = dev.firmware_version
-                result.detail = "version from discovery (SSH failed)"
-            else:
-                result.status = "error"
-                result.detail = str(e)[:40]
+        # First-boot devices: use discovery version only
+        if dev.is_first_boot:
+            result.current_version = dev.firmware_version or ""
+            if not result.current_version:
+                result.status = "first-boot"
+                result.detail = "First boot — no version"
                 return result
+            result.detail = "first boot (discovery version)"
+        else:
+            # SSH in to get the full PUF version from VER -V
+            try:
+                with CrestronSSH(host, username, password) as ssh:
+                    if not dev.model:
+                        dev.model = ssh.model
+                    ver_output = ssh.send_command("VER -V", timeout=20)
+                    for line in ver_output.splitlines():
+                        if "PUF:" in line.upper() and "PUFEXEC" not in line.upper():
+                            m = re.search(r"PUF:\s*([\d.]+)", line, re.IGNORECASE)
+                            if m:
+                                result.current_version = m.group(1)
+                                break
+            except Exception as e:
+                # Fall back to discovery version if SSH fails
+                if dev.firmware_version:
+                    result.current_version = dev.firmware_version
+                    result.detail = "version from discovery (SSH failed)"
+                else:
+                    result.status = "error"
+                    result.detail = str(e)[:40]
+                    return result
 
         if not result.current_version:
             result.current_version = dev.firmware_version or ""
@@ -966,9 +1004,9 @@ def _flow_firmware_audit(config: Config) -> None:
         for future in as_completed(futures):
             results.append(future.result())
 
-    # Sort: updates first, then errors, then up-to-date
-    status_order = {"update-available": 0, "error": 1, "unknown": 2, "newer": 3, "up-to-date": 4}
-    results.sort(key=lambda r: (status_order.get(r.status, 5), r.device.ip))
+    # Sort: updates first, then first-boot, then errors, then up-to-date
+    status_order = {"update-available": 0, "first-boot": 1, "error": 2, "unknown": 3, "newer": 4, "up-to-date": 5}
+    results.sort(key=lambda r: (status_order.get(r.status, 6), r.device.ip))
 
     # Display results
     _clear()
@@ -976,6 +1014,7 @@ def _flow_firmware_audit(config: Config) -> None:
 
     updates_available = sum(1 for r in results if r.status == "update-available")
     up_to_date = sum(1 for r in results if r.status == "up-to-date")
+    first_boot_count = sum(1 for r in results if r.status == "first-boot")
     errors = sum(1 for r in results if r.status in ("error", "unknown"))
 
     table = Table(
@@ -1003,6 +1042,9 @@ def _flow_firmware_audit(config: Config) -> None:
         elif r.status == "newer":
             available = r.available_version or "—"
             status = "[cyan]✓ Newer on Device[/cyan]"
+        elif r.status == "first-boot":
+            available = "—"
+            status = "[yellow]⚠ First Boot[/yellow]"
         elif r.status == "error":
             available = "—"
             status = f"[red]✗ {r.detail}[/red]"
@@ -1021,6 +1063,8 @@ def _flow_firmware_audit(config: Config) -> None:
         summary_parts.append(f"[yellow]{updates_available} update(s) available[/yellow]")
     if up_to_date:
         summary_parts.append(f"[green]{up_to_date} up to date[/green]")
+    if first_boot_count:
+        summary_parts.append(f"[yellow]{first_boot_count} first boot (needs provisioning)[/yellow]")
     if errors:
         summary_parts.append(f"[dim]{errors} could not be checked[/dim]")
     console.print("  ".join(summary_parts))
