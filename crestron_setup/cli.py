@@ -852,8 +852,8 @@ def _flow_restore() -> None:
 
 def _flow_firmware_audit(config: Config) -> None:
     """Discover devices and compare firmware versions against available updates."""
-    import re
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    from dataclasses import dataclass
 
     from .firmware import (
         _parse_puf_metadata,
@@ -861,7 +861,6 @@ def _flow_firmware_audit(config: Config) -> None:
         find_local_firmware,
         version_compare,
     )
-    from .ssh import CrestronSSH
 
     _header("Firmware Audit")
     devices = discover_devices(config, console)
@@ -875,18 +874,9 @@ def _flow_firmware_audit(config: Config) -> None:
         _pause()
         return
 
-    # Get credentials for SSH access
-    creds = _prompt_credentials()
-    if not creds:
-        return
-    username, password = creds
-
-    # Audit each device in parallel
     console.print()
-    console.print("[cyan][INFO][/cyan] Scanning firmware versions…")
+    console.print(f"[cyan][INFO][/cyan] {len(devices)} device(s) found. Checking firmware…")
     console.print()
-
-    from dataclasses import dataclass
 
     @dataclass
     class _AuditResult:
@@ -894,59 +884,38 @@ def _flow_firmware_audit(config: Config) -> None:
         current_version: str = ""
         available_version: str = ""
         available_path: str = ""
-        status: str = ""  # "up-to-date", "update-available", "newer", "unknown", "error"
-        error: str = ""
+        status: str = ""
+        detail: str = ""
 
-    results: list[_AuditResult] = []
+    def _check_firmware(dev: Device) -> _AuditResult:
+        result = _AuditResult(device=dev, current_version=dev.firmware_version)
 
-    def _audit_device(dev: Device) -> _AuditResult:
-        host = dev.ip or dev.hostname
-        result = _AuditResult(device=dev)
-
-        # Connect and read version
-        try:
-            with CrestronSSH(host, username, password) as ssh:
-                if not dev.model:
-                    dev.model = ssh.model
-                ver_output = ssh.send_command("VER -V", timeout=20)
-                for line in ver_output.splitlines():
-                    if "PUF:" in line.upper() and "PUFEXEC" not in line.upper():
-                        m = re.search(r"PUF:\s*([\d.]+)", line, re.IGNORECASE)
-                        if m:
-                            result.current_version = m.group(1)
-                            break
-        except Exception as e:
-            result.status = "error"
-            result.error = str(e)
-            return result
-
-        if not result.current_version:
+        model = dev.model
+        if not model:
             result.status = "unknown"
-            result.error = "Could not read PUF version"
+            result.detail = "No model detected"
             return result
 
-        # Find available firmware
-        fw_model = dev.model or ""
-        if not fw_model:
+        if not dev.firmware_version:
             result.status = "unknown"
-            result.error = "No model detected"
+            result.detail = "No version from discovery"
             return result
 
-        fw_path, fw_version = find_local_firmware(fw_model, config)
+        fw_path, fw_version = find_local_firmware(model, config)
         if not fw_path:
-            fw_path = download_firmware_quiet(fw_model, config)
+            fw_path = download_firmware_quiet(model, config)
             if fw_path:
                 fw_version, _ = _parse_puf_metadata(fw_path)
 
         if not fw_path or not fw_version:
             result.status = "unknown"
-            result.error = "No firmware available"
+            result.detail = "No firmware available"
             return result
 
         result.available_version = fw_version
         result.available_path = fw_path.name
 
-        cmp = version_compare(fw_version, result.current_version)
+        cmp = version_compare(fw_version, dev.firmware_version)
         if cmp == 0:
             result.status = "up-to-date"
         elif cmp > 0:
@@ -956,13 +925,15 @@ def _flow_firmware_audit(config: Config) -> None:
 
         return result
 
+    results: list[_AuditResult] = []
+    # Check firmware availability per model (may download, so parallelize)
     with ThreadPoolExecutor(max_workers=min(len(devices), 8)) as pool:
-        futures = {pool.submit(_audit_device, dev): dev for dev in devices}
+        futures = {pool.submit(_check_firmware, dev): dev for dev in devices}
         for future in as_completed(futures):
             results.append(future.result())
 
-    # Sort by status priority: updates first, then errors, then up-to-date
-    status_order = {"update-available": 0, "error": 1, "unknown": 2, "newer": 3, "up-to-date": 4}
+    # Sort: updates first, then errors, then up-to-date
+    status_order = {"update-available": 0, "unknown": 1, "newer": 2, "up-to-date": 3}
     results.sort(key=lambda r: (status_order.get(r.status, 5), r.device.ip))
 
     # Display results
@@ -971,7 +942,7 @@ def _flow_firmware_audit(config: Config) -> None:
 
     updates_available = sum(1 for r in results if r.status == "update-available")
     up_to_date = sum(1 for r in results if r.status == "up-to-date")
-    errors = sum(1 for r in results if r.status in ("error", "unknown"))
+    unknown = sum(1 for r in results if r.status == "unknown")
 
     table = Table(
         title="Firmware Audit Results",
@@ -982,7 +953,7 @@ def _flow_firmware_audit(config: Config) -> None:
     table.add_column("Model", min_width=10)
     table.add_column("Current", min_width=12)
     table.add_column("Available", min_width=12)
-    table.add_column("Status", min_width=14)
+    table.add_column("Status", min_width=18)
 
     for r in results:
         host = r.device.ip or r.device.hostname
@@ -997,13 +968,10 @@ def _flow_firmware_audit(config: Config) -> None:
             status = "[green]✓ Up to Date[/green]"
         elif r.status == "newer":
             available = r.available_version or "—"
-            status = "[cyan]✓ Newer[/cyan]"
-        elif r.status == "error":
-            available = "—"
-            status = f"[red]✗ {r.error[:30]}[/red]"
+            status = "[cyan]✓ Newer on Device[/cyan]"
         else:
             available = "—"
-            status = f"[dim]{r.error[:30]}[/dim]"
+            status = f"[dim]{r.detail}[/dim]"
 
         table.add_row(host, model, current, available, status)
 
@@ -1016,8 +984,8 @@ def _flow_firmware_audit(config: Config) -> None:
         summary_parts.append(f"[yellow]{updates_available} update(s) available[/yellow]")
     if up_to_date:
         summary_parts.append(f"[green]{up_to_date} up to date[/green]")
-    if errors:
-        summary_parts.append(f"[red]{errors} error(s)[/red]")
+    if unknown:
+        summary_parts.append(f"[dim]{unknown} unknown[/dim]")
     console.print("  ".join(summary_parts))
     console.print()
     console.print(f"[dim]{len(results)} device(s) scanned. No changes were made.[/dim]")
