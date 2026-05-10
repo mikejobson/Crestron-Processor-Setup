@@ -2384,6 +2384,7 @@ def _flow_ip_table(config: Config, host: str | None = None,
 
     try:
         while True:
+            _header(f"IP Table — {host} ({ssh.model})")
             choice = questionary.select(
                 f"IP Table — {host}",
                 choices=[
