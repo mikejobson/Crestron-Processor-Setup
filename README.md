@@ -9,6 +9,7 @@ Cross-platform interactive console for Crestron processor provisioning. Discover
 - **Cross-Platform** — Python + paramiko (works on macOS, Linux, and Windows — no `expect` dependency)
 - **Firmware Management** — Download firmware from configurable URLs and upload to processors
 - **Firmware Audit** — Scan discovered devices, compare firmware versions, report which need updates (read-only)
+- **Batch Provisioning** — Import device lists from CSV or YAML files for bulk provisioning with per-device credentials and profiles
 - **Network Configuration** — Set static IP or DHCP per device during provisioning
 - **Restore & Erase** — Factory-reset devices with `initialize` + `restore` commands
 - **6-Phase Provisioning**:
@@ -117,6 +118,35 @@ If you have a firmware server that exposes a JSON metadata API, set `firmware_se
 ```
 
 This enables version comparison without downloading the full firmware file, and verifies the SHA256 hash after download. The server is checked before falling back to per-model `firmware_urls`.
+
+### Batch Provisioning
+
+Import a list of devices from a CSV or YAML file for bulk provisioning. Supports per-device credentials and profile assignments.
+
+**CSV format** (`examples/batch.csv`):
+```csv
+hostname,username,password,profile
+192.168.1.10,admin,admin,default
+192.168.1.20,,,touch-panel
+192.168.1.30,,,
+```
+
+**YAML format** (`examples/batch.yaml`):
+```yaml
+devices:
+  - hostname: 192.168.1.10
+    username: admin
+    password: admin
+    profile: default
+  - hostname: 192.168.1.20
+    profile: touch-panel
+  - hostname: 192.168.1.30
+```
+
+- `hostname` (or `ip` / `host`) is required
+- `username`, `password`, `profile` are optional — devices without them use shared credentials/profile prompted at runtime
+- Supports both provision and dry-run modes
+- Runs all devices in parallel with live progress display
 
 ### Configuration Profiles
 

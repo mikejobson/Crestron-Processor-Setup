@@ -1,0 +1,5 @@
+hostname,username,password,profile
+192.168.1.10,admin,admin,default
+192.168.1.11,admin,admin,default
+192.168.1.20,admin,admin,touch-panel
+192.168.1.30,,,

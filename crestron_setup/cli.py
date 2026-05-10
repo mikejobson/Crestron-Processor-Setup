@@ -301,6 +301,7 @@ def main() -> None:
         menu_choices = [
             questionary.Choice("Discover Devices", value="discover"),
             questionary.Choice("Setup Device (manual IP)", value="setup"),
+            questionary.Choice("Batch Provision (CSV/YAML)", value="batch"),
             questionary.Choice("Upload Program", value="program"),
             questionary.Choice("Firmware Audit", value="fw_audit"),
             questionary.Choice("Restore & Erase Device", value="restore"),
@@ -325,6 +326,8 @@ def main() -> None:
             config = _flow_discover(config)
         elif choice == "setup":
             _flow_manual_setup(config)
+        elif choice == "batch":
+            config = _flow_batch_provision(config)
         elif choice == "program":
             config = _flow_upload_program(config)
         elif choice == "restore":
@@ -756,6 +759,225 @@ def _flow_manual_setup(config: Config) -> None:
         profile_name=profile_name,
     )
     _pause()
+
+
+# --------------------------------------------------------------------------- #
+#  Batch Provision flow
+# --------------------------------------------------------------------------- #
+
+
+def _flow_batch_provision(config: Config) -> Config:
+    """Provision multiple devices from a CSV or YAML batch file."""
+    import csv
+    from pathlib import Path
+
+    import yaml
+
+    _header("Batch Provision")
+
+    # Pick the batch file
+    file_path = questionary.path(
+        "Path to batch file (CSV or YAML):",
+        only_directories=False,
+    ).ask()
+    if not file_path:
+        return config
+
+    path = Path(file_path).expanduser().resolve()
+    if not path.is_file():
+        console.print(f"[red][FAIL][/red] File not found: {path}")
+        _pause()
+        return config
+
+    # Parse the batch file
+    entries: list[dict[str, str]] = []
+    ext = path.suffix.lower()
+
+    try:
+        if ext in (".yaml", ".yml"):
+            with open(path, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            if not isinstance(data, dict) or "devices" not in data:
+                console.print("[red][FAIL][/red] YAML must have a top-level 'devices' list.")
+                _pause()
+                return config
+            raw_list = data["devices"]
+            if not isinstance(raw_list, list):
+                console.print("[red][FAIL][/red] 'devices' must be a list.")
+                _pause()
+                return config
+            for item in raw_list:
+                if isinstance(item, str):
+                    entries.append({"hostname": item})
+                elif isinstance(item, dict):
+                    entries.append({k: str(v) for k, v in item.items()})
+        elif ext == ".csv":
+            with open(path, newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    entries.append({k.strip().lower(): (v or "").strip() for k, v in row.items()})
+        else:
+            console.print(f"[red][FAIL][/red] Unsupported file type: {ext}")
+            console.print("[dim]Supported: .csv, .yaml, .yml[/dim]")
+            _pause()
+            return config
+    except Exception as e:
+        console.print(f"[red][FAIL][/red] Error reading batch file: {e}")
+        _pause()
+        return config
+
+    if not entries:
+        console.print("[yellow][WARN][/yellow] No devices found in batch file.")
+        _pause()
+        return config
+
+    # Validate entries — hostname is required
+    valid_entries: list[dict[str, str]] = []
+    for i, entry in enumerate(entries, 1):
+        host = entry.get("hostname") or entry.get("ip") or entry.get("host") or ""
+        if not host:
+            console.print(f"[yellow][WARN][/yellow] Row {i}: Missing hostname/ip — skipped.")
+            continue
+        entry["_host"] = host
+        valid_entries.append(entry)
+
+    if not valid_entries:
+        console.print("[red][FAIL][/red] No valid devices in batch file.")
+        _pause()
+        return config
+
+    # Show what we found
+    table = Table(title="Batch Devices", border_style="cyan", show_lines=False)
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Hostname / IP", style="cyan", min_width=20)
+    table.add_column("Username", min_width=12)
+    table.add_column("Profile", min_width=12)
+
+    has_per_device_creds = any(entry.get("username") for entry in valid_entries)
+
+    for i, entry in enumerate(valid_entries, 1):
+        table.add_row(
+            str(i),
+            entry["_host"],
+            entry.get("username", "") or "[dim]—[/dim]",
+            entry.get("profile", "") or "[dim]—[/dim]",
+        )
+    console.print(table)
+    console.print(f"\n[cyan]{len(valid_entries)}[/cyan] device(s) loaded from {path.name}\n")
+
+    # Prompt for shared credentials (used where per-device creds not specified)
+    if has_per_device_creds:
+        console.print("[dim]Some devices have credentials in the batch file.[/dim]")
+        need_shared = any(not entry.get("username") for entry in valid_entries)
+        if need_shared:
+            console.print("[dim]Devices without credentials will use shared credentials.[/dim]")
+            creds = _prompt_credentials()
+            if not creds:
+                return config
+            shared_user, shared_pass = creds
+        else:
+            shared_user, shared_pass = "", ""
+    else:
+        console.print("[dim]Enter credentials to use for all devices.[/dim]")
+        creds = _prompt_credentials()
+        if not creds:
+            return config
+        shared_user, shared_pass = creds
+
+    # Run mode
+    mode = questionary.select(
+        "Run mode:",
+        choices=[
+            questionary.Choice("Provision (apply changes)", value="provision"),
+            questionary.Choice("Provision (Dry Run)", value="dry_run"),
+        ],
+    ).ask()
+    if not mode:
+        return config
+
+    # Profile selection — use per-device profile if specified, else prompt for shared
+    shared_profile: str | None = None
+    has_per_device_profile = any(entry.get("profile") for entry in valid_entries)
+    need_shared_profile = any(not entry.get("profile") for entry in valid_entries)
+
+    if config.profiles and need_shared_profile:
+        if has_per_device_profile:
+            console.print("[dim]Devices without a profile will use the shared selection.[/dim]")
+        shared_profile = _prompt_profile_selection(config)
+
+    # Build Device objects and run
+    devices: list[Device] = []
+    device_creds: list[tuple[str, str]] = []
+    device_profiles: list[str | None] = []
+
+    for entry in valid_entries:
+        dev = Device(ip=entry["_host"])
+        devices.append(dev)
+
+        user = entry.get("username") or shared_user
+        pw = entry.get("password") or shared_pass
+        device_creds.append((user, pw))
+
+        prof = entry.get("profile") or shared_profile
+        device_profiles.append(prof if prof else None)
+
+    action = "dry_run" if mode == "dry_run" else "provision"
+
+    # Run in parallel using existing infrastructure
+    device_results = _run_parallel_batch(
+        action, devices, device_creds, device_profiles, config,
+    )
+    _show_parallel_summary(device_results, config)
+    return config
+
+
+def _run_parallel_batch(
+    action: str,
+    devices: list[Device],
+    device_creds: list[tuple[str, str]],
+    device_profiles: list[str | None],
+    config: Config,
+) -> list[DeviceResult]:
+    """Run provision/dry-run on multiple devices with per-device creds and profiles."""
+    from .provisioning import PHASE_NAMES
+
+    device_results: list[DeviceResult] = []
+    for dev in devices:
+        ip = dev.ip or dev.hostname
+        label = ip
+        tracker = _StepTracker(label, list(PHASE_NAMES))
+        if action == "dry_run":
+            tracker._panel_title = f"Provision (Dry Run) — {label}"
+        device_results.append(DeviceResult(
+            device_label=label, action=action, success=False, tracker=tracker,
+        ))
+
+    display = _ParallelDisplay(device_results)
+
+    def _worker(idx: int) -> None:
+        dev = devices[idx]
+        dr = device_results[idx]
+        username, password = device_creds[idx]
+        profile = device_profiles[idx]
+
+        result = provision_device(
+            dev, username, password, config, console,
+            headless=True, tracker=dr.tracker,
+            dry_run=(action == "dry_run"),
+            profile_name=profile,
+        )
+        dr.success, _, dr.results = result  # type: ignore[misc]
+
+    _clear()
+    with Live(display, console=console, refresh_per_second=8):
+        with ThreadPoolExecutor(max_workers=len(devices)) as pool:
+            futures = [pool.submit(_worker, i) for i in range(len(devices))]
+            while not all(f.done() for f in futures):
+                time.sleep(0.25)
+            for f in futures:
+                f.result()
+
+    return device_results
 
 
 # --------------------------------------------------------------------------- #
