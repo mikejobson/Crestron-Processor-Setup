@@ -15,7 +15,7 @@ ntp_server: "pool.ntp.org"
 pubkey_file: "~/.ssh/id_rsa.pub"
 
 # Local directory to search for .puf firmware files (fallback if no download URL)
-firmware_dir: "~/Sync/Crestron Firmware"
+firmware_dir: "~/Downloads"
 
 # Web server ports
 web_port: 8080

@@ -182,7 +182,7 @@ class Config:
     timezone: str = "33"
     ntp_server: str = "pool.ntp.org"
     pubkey_file: str = "~/.ssh/id_rsa.pub"
-    firmware_dir: str = "~/Sync/Crestron Firmware"
+    firmware_dir: str = "~/Downloads"
     web_port: int = 8080
     secure_web_port: int = 8443
     user_login_attempts: int = 5

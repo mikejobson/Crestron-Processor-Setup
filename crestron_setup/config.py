@@ -144,7 +144,7 @@ def load_config() -> Config:
         timezone=str(data.get("timezone", "33")),
         ntp_server=data.get("ntp_server", "pool.ntp.org"),
         pubkey_file=data.get("pubkey_file", "~/.ssh/id_rsa.pub"),
-        firmware_dir=data.get("firmware_dir", "~/Sync/Crestron Firmware"),
+        firmware_dir=data.get("firmware_dir", "~/Downloads"),
         web_port=int(data.get("web_port", 8080)),
         secure_web_port=int(data.get("secure_web_port", 8443)),
         user_login_attempts=int(data.get("user_login_attempts", 5)),
