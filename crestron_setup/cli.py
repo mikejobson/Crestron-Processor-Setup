@@ -2351,14 +2351,6 @@ def _ip_table_clear(ssh: "CrestronSSH") -> None:
     _ip_table_view(ssh)
 
 
-def _ip_table_save(ssh: "CrestronSSH") -> None:
-    """Save IP table to flash."""
-    resp = ssh.send_command("SENDIPTABLE", timeout=15)
-    console.print(f"[green][OK][/green] IP table saved to flash.")
-    if resp.strip():
-        console.print(f"[dim]{resp.strip()}[/dim]")
-
-
 def _flow_ip_table(config: Config, host: str | None = None,
                    username: str | None = None,
                    password: str | None = None) -> Config:
@@ -2401,7 +2393,6 @@ def _flow_ip_table(config: Config, host: str | None = None,
                     questionary.Choice("Add Peer Entry", value="add_peer"),
                     questionary.Choice("Remove Peer Entry", value="rem_peer"),
                     questionary.Choice("Clear IP Table", value="clear"),
-                    questionary.Choice("Save to Flash", value="save"),
                     questionary.Choice("Back", value="back"),
                 ],
             ).ask()
@@ -2422,8 +2413,6 @@ def _flow_ip_table(config: Config, host: str | None = None,
                     _ip_table_remove_peer(ssh)
                 elif choice == "clear":
                     _ip_table_clear(ssh)
-                elif choice == "save":
-                    _ip_table_save(ssh)
             except Exception as e:
                 console.print(f"[red][FAIL][/red] {e}")
 
