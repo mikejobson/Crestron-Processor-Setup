@@ -2374,6 +2374,7 @@ def _flow_ip_table(config: Config, host: str | None = None,
     # Connect once, keep alive for the session
     try:
         ssh = CrestronSSH(host, username, password)
+        ssh.connect()
     except Exception as e:
         console.print(f"[red][FAIL][/red] Connection failed: {e}")
         _pause()
