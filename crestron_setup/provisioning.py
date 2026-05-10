@@ -198,22 +198,26 @@ def provision_device(
     skip_reboot: bool = False,
     headless: bool = False,
     tracker: _StepTracker | None = None,
+    dry_run: bool = False,
 ) -> bool | tuple[bool, _StepTracker, dict[str, str]]:
     """Run all 5 provisioning phases against a single device.
 
+    When dry_run=True, connects read-only to show what would change.
     When headless=True, returns (success, tracker, results) without displaying.
     Otherwise returns True/False and shows results on console.
     """
     host = device.ip or device.hostname
     if tracker is None:
         tracker = _StepTracker(host, list(PHASE_NAMES))
+    if dry_run:
+        tracker._panel_title = f"Provision (Dry Run) — {tracker.device_label}"
     results: dict[str, str] = {"host": host, "username": username}
 
     if headless:
         success = _run_provisioning(
             host, device, username, password, config, console,
             tracker, results, skip_firmware, skip_reboot,
-            headless=True,
+            headless=True, dry_run=dry_run,
         )
         return success, tracker, results
 
@@ -221,8 +225,12 @@ def provision_device(
     success = _run_provisioning(
         host, device, username, password, config, console,
         tracker, results, skip_firmware, skip_reboot,
+        dry_run=dry_run,
     )
-    _show_results(console, tracker, results, success, config)
+    if dry_run:
+        _show_dry_run_results(console, tracker, results, success, config)
+    else:
+        _show_results(console, tracker, results, success, config)
     return success
 
 
@@ -238,6 +246,7 @@ def _run_provisioning(
     skip_firmware: bool,
     skip_reboot: bool,
     headless: bool = False,
+    dry_run: bool = False,
 ) -> bool:
     """Execute all phases inside a Live display. Returns True on success."""
     model_name = ""
@@ -249,6 +258,12 @@ def _run_provisioning(
     )
 
     try:
+        if dry_run:
+            return _run_dry_run_inner(
+                host, device, username, password, config, console,
+                tracker, results, skip_firmware, skip_reboot, pubkey_path,
+                headless=headless,
+            )
         return _run_provisioning_inner(
             host, device, username, password, config, console,
             tracker, results, skip_firmware, skip_reboot, pubkey_path,
@@ -594,6 +609,263 @@ def _run_provisioning_inner(
     return all(s in ("ok", "skip") for s in tracker.statuses)
 
 
+def _run_dry_run_inner(
+    host: str,
+    device: Device,
+    username: str,
+    password: str,
+    config: Config,
+    console: Console,
+    tracker: _StepTracker,
+    results: dict[str, str],
+    skip_firmware: bool,
+    skip_reboot: bool,
+    pubkey_path: Path | None,
+    headless: bool = False,
+) -> bool:
+    """Execute a dry run: connect read-only, collect planned changes."""
+    planned_commands: list[str] = []
+    planned_uploads: list[str] = []
+    current_puf_version = ""
+    model_name = ""
+
+    live_cm: Live | _NullLive = (
+        _NullLive() if headless
+        else Live(tracker, console=console, refresh_per_second=10)
+    )
+    with live_cm as live:
+
+        # ── Phase 1: Check Connectivity ────────────────────────────────
+        tracker.start(0, "Checking connectivity…")
+        live.update(tracker)
+
+        with _quiet_ssh():
+            login_ok = not device.is_first_boot and _try_login(
+                host, username, password
+            )
+
+        if device.is_first_boot:
+            tracker.skip(
+                0,
+                "First boot — account creation required before dry run",
+            )
+            for i in range(1, len(PHASE_NAMES)):
+                tracker.skip(i)
+            live.update(tracker)
+            time.sleep(1)
+
+            results["first_boot_skip"] = "true"
+            return True
+        elif login_ok:
+            tracker.ok(0, f"Login OK as '{username}'")
+        else:
+            tracker.fail(0, "Cannot connect — verify credentials")
+            live.update(tracker)
+            time.sleep(2)
+            return False
+        live.update(tracker)
+
+        # ── Phase 2: Verify Public Key ─────────────────────────────────
+        tracker.start(1, "Checking key…")
+        live.update(tracker)
+
+        if not pubkey_path:
+            tracker.skip(1, "Key not found — would skip")
+        else:
+            tracker.ok(1, f"Would upload {pubkey_path.name} → /user/")
+            planned_uploads.append(f"{pubkey_path.name} → /user/{pubkey_path.name}")
+        live.update(tracker)
+
+        # ── Phase 3: Review Configuration ──────────────────────────────
+        tracker.start(2, "Reading current config…")
+        live.update(tracker)
+
+        now = datetime.now()
+        pubkey_basename = pubkey_path.name if pubkey_path else ""
+        if pubkey_basename:
+            planned_commands.append(
+                f"ADDPUBKEYTOUSER -N:{username} -K:{pubkey_basename}"
+            )
+        planned_commands += [
+            f"TIMEZONE {config.timezone}",
+            f"TIMEDATE {now.strftime('%H:%M:%S')} {now.strftime('%m-%d-%Y')}",
+            f"SNTP SERVER:{config.ntp_server}",
+            "SNTP SYNC",
+            f"WEBPORT {config.web_port}",
+            f"SECUREWEBPORT {config.secure_web_port}",
+            f"SETUSERLOGINATTEMPTS {config.user_login_attempts}",
+            f"SETUSERLOCKOUTTIME {config.user_lockout_time}",
+            f"SETLOGINATTEMPTS {config.login_attempts}",
+            f"SETLOCKOUTTIME {config.lockout_time}",
+            f"FIPSMODE {config.fips_mode}",
+        ]
+        cmd_count = len(planned_commands)
+
+        # Connect read-only to gather current state
+        if not device.is_first_boot and login_ok:
+            try:
+                with _quiet_ssh():
+                    with CrestronSSH(host, username, password) as ssh:
+                        model_name = ssh.model
+                        results["model"] = model_name
+
+                        tracker.details[2] = "Reading version…"
+                        live.update(tracker)
+                        ver_output = ssh.send_command("VER -V", timeout=20)
+
+                        for line in ver_output.splitlines():
+                            if (
+                                "PUF:" in line.upper()
+                                and "PUFEXEC" not in line.upper()
+                            ):
+                                m = re.search(
+                                    r"PUF:\s*([\d.]+)", line, re.IGNORECASE
+                                )
+                                if m:
+                                    current_puf_version = m.group(1)
+                                    break
+
+                        # Read current settings for comparison
+                        read_cmds = [
+                            ("TIMEZONE", "timezone"),
+                            ("SNTP", "sntp"),
+                            ("WEBPORT", "web_port"),
+                            ("SECUREWEBPORT", "secure_web_port"),
+                            ("HOSTNAME", "hostname"),
+                            ("FIPSMODE", "fips_mode"),
+                            ("SETUSERLOGINATTEMPTS", "user_login_attempts"),
+                            ("SETUSERLOCKOUTTIME", "user_lockout_time"),
+                            ("SETLOGINATTEMPTS", "login_attempts"),
+                            ("SETLOCKOUTTIME", "lockout_time"),
+                        ]
+                        current_values: dict[str, str] = {}
+                        for i, (cmd, key) in enumerate(read_cmds):
+                            tracker.details[2] = (
+                                f"Reading settings… ({i + 1}/{len(read_cmds)})"
+                            )
+                            live.update(tracker)
+                            try:
+                                resp = ssh.send_command(cmd, timeout=10)
+                                current_values[key] = resp.strip()
+                            except Exception:
+                                current_values[key] = ""
+
+                        results["current_values"] = "\n".join(
+                            f"{k}={v}" for k, v in current_values.items()
+                        )
+
+                        tracker.details[2] = "Reading network config…"
+                        live.update(tracker)
+                        ip_output = ssh.send_command("IPCONFIG /ALL", timeout=10)
+                        results["current_ipconfig"] = ip_output
+
+                detail = f"{cmd_count} commands planned"
+                if model_name:
+                    device.model = model_name
+                    detail = f"{model_name} — {detail}"
+                tracker.ok(2, detail)
+                results["puf_version"] = current_puf_version
+            except Exception as e:
+                tracker.fail(2, f"Cannot read config: {e}")
+                live.update(tracker)
+                time.sleep(2)
+                return False
+        else:
+            tracker.ok(2, f"{cmd_count} commands planned")
+        live.update(tracker)
+
+        # ── Phase 4: Review Network ────────────────────────────────────
+        net = device.network
+        if not net:
+            tracker.skip(3, "No changes requested")
+        elif net.mode == "dhcp":
+            if net.hostname:
+                planned_commands.append(f"HOSTNAME {net.hostname}")
+            planned_commands.append("DHCP 0 ON /now")
+            detail = "Would enable DHCP"
+            if net.hostname:
+                detail += f" — hostname: {net.hostname}"
+            tracker.ok(3, detail)
+        else:
+            if net.hostname:
+                planned_commands.append(f"HOSTNAME {net.hostname}")
+            planned_commands += [
+                f"IPADDRESS 0 {net.ip_address}",
+                f"IPMASK 0 {net.subnet_mask}",
+                f"DEFROUTER 0 {net.gateway}",
+            ]
+            for dns in net.dns_servers:
+                planned_commands.append(f"ADDDNS {dns}")
+            planned_commands.append("DHCP 0 OFF /now")
+            tracker.ok(3, f"Would set static IP {net.ip_address}/{net.subnet_mask}")
+        live.update(tracker)
+
+        # ── Phase 5: Reboot ────────────────────────────────────────────
+        if skip_reboot:
+            tracker.skip(4)
+        else:
+            planned_commands.append("REBOOT")
+            tracker.ok(4, "Would reboot and wait for reconnect")
+        live.update(tracker)
+
+        # ── Phase 6: Firmware ──────────────────────────────────────────
+        if skip_firmware:
+            tracker.skip(5)
+        else:
+            tracker.start(5, "Checking firmware…")
+            live.update(tracker)
+
+            fw_model = model_name or device.model
+            if not fw_model:
+                tracker.skip(5, "No model detected")
+            else:
+                fw_path, fw_version = find_local_firmware(fw_model, config)
+                if not fw_path:
+                    tracker.details[5] = "Checking download URL…"
+                    live.update(tracker)
+                    fw_path = download_firmware_quiet(fw_model, config)
+                    if fw_path:
+                        fw_version, _ = _parse_puf_metadata(fw_path)
+                if not fw_path:
+                    tracker.skip(5, "No firmware available")
+                elif current_puf_version and fw_version:
+                    cmp = version_compare(fw_version, current_puf_version)
+                    if cmp == 0:
+                        tracker.ok(5, f"Already at v{fw_version}")
+                    elif cmp < 0:
+                        tracker.ok(
+                            5,
+                            f"Local v{fw_version} older than v{current_puf_version}",
+                        )
+                    else:
+                        tracker.ok(
+                            5,
+                            f"Would upload v{fw_version} "
+                            f"(current: v{current_puf_version})",
+                        )
+                        planned_uploads.append(
+                            f"{fw_path.name} → /firmware/{fw_path.name}"
+                        )
+                        planned_commands.append("PUF")
+                else:
+                    tracker.ok(
+                        5,
+                        f"Would upload {fw_path.name} (cannot compare versions)",
+                    )
+                    planned_uploads.append(
+                        f"{fw_path.name} → /firmware/{fw_path.name}"
+                    )
+                    planned_commands.append("PUF")
+        live.update(tracker)
+
+        time.sleep(1)
+
+    results["planned_commands"] = "\n".join(planned_commands)
+    results["planned_uploads"] = "\n".join(planned_uploads)
+
+    return all(s in ("ok", "skip") for s in tracker.statuses)
+
+
 def _show_results(
     console: Console,
     tracker: _StepTracker,
@@ -647,6 +919,235 @@ def _show_results(
         else:
             console.print(info)
         console.print()
+
+
+def _compare_setting(current_response: str, planned_value: str,
+                     compare_type: str) -> bool:
+    """Smart comparison between a Crestron CLI response and a planned value.
+
+    The CLI returns verbose human-readable strings (e.g., "Lockout timeout:
+    1 minute") while config values are terse (e.g., "1m"). This function
+    extracts the meaningful value from the response and compares it against
+    the planned setting.
+    """
+    curr = current_response.strip().lower()
+    plan = planned_value.strip().lower()
+    if not curr:
+        return False
+
+    if compare_type == "port":
+        # "Webserver port =  8080" or "Secure(SSL) Webserver port =  8443"
+        m = re.search(r"(\d+)", curr)
+        return m is not None and m.group(1) == plan
+
+    if compare_type == "number":
+        # "Maximum user login attempts allowed: 5" or "Maximum attempts allowed: 20"
+        m = re.search(r"(\d+)\s*$", curr)
+        if not m:
+            # Try to find the number after a colon
+            m = re.search(r":\s*(\d+)", curr)
+        return m is not None and m.group(1) == plan
+
+    if compare_type == "fips":
+        # "FIPS mode: Disabled" → OFF, "FIPS mode: Enabled" → ON
+        if "disabled" in curr or "off" in curr:
+            return plan == "off"
+        if "enabled" in curr or "on" in curr:
+            return plan == "on"
+        return plan in curr
+
+    if compare_type == "duration":
+        # "Lockout timeout: 1 minute" → "1m", "5 minutes" → "5m"
+        # "Lockout timeout: 2 hours" → "2h"
+        # Extract number and unit from response
+        m = re.search(r"(\d+)\s*(minute|hour|min|hr)", curr)
+        if m:
+            num = m.group(1)
+            unit = m.group(2)
+            if unit.startswith("minute") or unit.startswith("min"):
+                return plan == f"{num}m"
+            if unit.startswith("hour") or unit.startswith("hr"):
+                return plan == f"{num}h"
+        # Fallback: check if planned value appears literally
+        return plan in curr
+
+    if compare_type == "sntp":
+        # SNTP response is multi-line; check if the server address appears
+        return plan in curr
+
+    if compare_type == "timezone":
+        # Timezone response may say "Daylight Time" while our label says
+        # "Standard Time" depending on DST.  They represent the same zone.
+        # Compare the timezone family name (before Daylight/Standard).
+        curr_family = re.sub(
+            r"\s*(daylight|standard)\s*time.*", "", curr
+        ).strip()
+        plan_family = re.sub(
+            r"\s*(daylight|standard)\s*time.*", "", plan
+        ).strip()
+        if curr_family and plan_family:
+            return curr_family == plan_family
+        # Fallback: direct substring match
+        return plan in curr
+
+    # Default: substring match
+    return plan in curr or curr == plan
+
+
+def _show_dry_run_results(
+    console: Console,
+    tracker: _StepTracker,
+    results: dict[str, str],
+    success: bool,
+    config: Config,
+) -> None:
+    """Display dry-run summary showing current vs planned configuration."""
+    _clear()
+
+    title = "[bold cyan]Provision (Dry Run) Complete[/bold cyan]"
+    border = "cyan"
+    if not success:
+        title = "[bold red]Provision (Dry Run) Failed[/bold red]"
+        border = "red"
+
+    console.print(
+        Panel(
+            tracker.render_static(),
+            title=title,
+            border_style=border,
+            padding=(1, 2),
+        )
+    )
+    console.print()
+
+    # Device info
+    info = Table.grid(padding=(0, 2))
+    info.add_column(style="bold")
+    info.add_column()
+
+    host = results.get("host", "")
+    model = results.get("model", "")
+    info.add_row("Device:", f"{model} @ {host}" if model else host)
+    info.add_row("Account:", results.get("username", ""))
+    if results.get("puf_version"):
+        info.add_row("Current PUF:", results["puf_version"])
+    console.print(info)
+    console.print()
+
+    # First-boot devices can't be dry-run — need account creation first
+    if results.get("first_boot_skip"):
+        console.print(
+            "[yellow][WARN][/yellow] This device is in first-boot mode. "
+            "An admin account must be created before a dry run can read "
+            "the current configuration.\n"
+            "Run [bold]Provision[/bold] first to create the account, then "
+            "use [bold]Provision (Dry Run)[/bold] to preview further changes."
+        )
+        console.print()
+        console.print("[dim]No changes were made to the device.[/dim]")
+        console.print()
+        return
+
+    # Parse current values read from device
+    current_values: dict[str, str] = {}
+    raw_cv = results.get("current_values", "")
+    if raw_cv:
+        for line in raw_cv.split("\n"):
+            if "=" in line:
+                k, v = line.split("=", 1)
+                current_values[k] = v
+
+    # Build configuration diff table with smart comparison
+    diff_rows: list[tuple[str, str, str, str]] = [
+        ("Timezone", current_values.get("timezone", ""),
+         timezone_label(config.timezone), "timezone"),
+        ("NTP Server", current_values.get("sntp", ""),
+         config.ntp_server, "sntp"),
+        ("Web Port", current_values.get("web_port", ""),
+         str(config.web_port), "port"),
+        ("Secure Web Port", current_values.get("secure_web_port", ""),
+         str(config.secure_web_port), "port"),
+        ("FIPS Mode", current_values.get("fips_mode", ""),
+         config.fips_mode, "fips"),
+        ("User Login Attempts", current_values.get("user_login_attempts", ""),
+         str(config.user_login_attempts), "number"),
+        ("User Lockout Time", current_values.get("user_lockout_time", ""),
+         config.user_lockout_time, "duration"),
+        ("Console Login Attempts", current_values.get("login_attempts", ""),
+         str(config.login_attempts), "number"),
+        ("Console Lockout Time", current_values.get("lockout_time", ""),
+         config.lockout_time, "duration"),
+    ]
+
+    if current_values:
+        diff_table = Table(
+            title="Configuration Changes",
+            border_style="cyan",
+            show_lines=False,
+        )
+        diff_table.add_column("Setting", style="bold")
+        diff_table.add_column("Current")
+        diff_table.add_column("")
+        diff_table.add_column("Planned")
+        diff_table.add_column("")
+
+        for label, current, planned, compare_type in diff_rows:
+            matches = _compare_setting(current, planned, compare_type)
+            if not current.strip():
+                arrow = "→"
+                status = ""
+                current_display = "[dim]unknown[/dim]"
+                planned_display = f"[yellow]{planned}[/yellow]"
+            elif matches:
+                arrow = ""
+                status = "[dim]no change[/dim]"
+                current_display = f"[dim]{current}[/dim]"
+                planned_display = ""
+            else:
+                arrow = "→"
+                status = "[yellow]changed[/yellow]"
+                current_display = current
+                planned_display = f"[yellow]{planned}[/yellow]"
+
+            diff_table.add_row(
+                label, current_display, arrow, planned_display, status,
+            )
+
+        console.print(diff_table)
+        console.print()
+
+    # Planned commands
+    cmds = results.get("planned_commands", "")
+    if cmds:
+        cmd_table = Table(
+            title="Commands to Execute",
+            border_style="yellow",
+            show_lines=False,
+        )
+        cmd_table.add_column("#", style="dim", width=4)
+        cmd_table.add_column("Command")
+        for i, cmd in enumerate(cmds.split("\n"), 1):
+            cmd_table.add_row(str(i), cmd)
+        console.print(cmd_table)
+        console.print()
+
+    # Planned uploads
+    uploads = results.get("planned_uploads", "")
+    if uploads:
+        console.print("[bold]Files to Upload:[/bold]")
+        for upload in uploads.split("\n"):
+            console.print(f"  [yellow]↑[/yellow] {upload}")
+        console.print()
+
+    # Current network info
+    ipconfig = results.get("current_ipconfig", "")
+    if ipconfig:
+        console.print("[bold]Current Network Configuration:[/bold]")
+        console.print(ipconfig)
+        console.print()
+
+    console.print("[dim]No changes were made to the device.[/dim]")
+    console.print()
 
 
 RESTORE_PHASE_NAMES = [

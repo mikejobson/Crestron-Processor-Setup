@@ -30,6 +30,7 @@ from .provisioning import (
     DeviceResult,
     _ParallelDisplay,
     _StepTracker,
+    _show_dry_run_results,
     provision_device,
     restore_device,
     upload_program,
@@ -330,6 +331,7 @@ def _flow_discover(config: Config) -> Config:
         "What do you want to do?",
         choices=[
             questionary.Choice("Provision", value="provision"),
+            questionary.Choice("Provision (Dry Run)", value="dry_run"),
             questionary.Choice("Upload Program", value="program"),
             questionary.Choice("Restore & Erase", value="restore"),
             questionary.Choice("Back to Main Menu", value="back"),
@@ -371,7 +373,7 @@ def _flow_discover(config: Config) -> Config:
     program_path: str = ""
     slot: int = 1
 
-    if action == "provision":
+    if action in ("provision", "dry_run"):
         # Network configuration per device
         if len(selected_devices) == 1:
             net = _prompt_network_config(selected_devices[0].ip)
@@ -461,6 +463,8 @@ def _flow_discover(config: Config) -> Config:
         dev = selected_devices[0]
         if action == "provision":
             provision_device(dev, username, password, config, console)
+        elif action == "dry_run":
+            provision_device(dev, username, password, config, console, dry_run=True)
         elif action == "program":
             host = dev.ip or dev.hostname
             upload_program(host, username, password, program_path, slot, console)
@@ -503,6 +507,10 @@ def _run_parallel(
         if action == "provision":
             from .provisioning import PHASE_NAMES
             tracker = _StepTracker(label, list(PHASE_NAMES))
+        elif action == "dry_run":
+            from .provisioning import PHASE_NAMES
+            tracker = _StepTracker(label, list(PHASE_NAMES))
+            tracker._panel_title = f"Provision (Dry Run) — {label}"
         elif action == "program":
             from .provisioning import PROGRAM_PHASE_NAMES
             tracker = _StepTracker(label, list(PROGRAM_PHASE_NAMES))
@@ -522,6 +530,12 @@ def _run_parallel(
             result = provision_device(
                 dev, username, password, config, console,
                 headless=True, tracker=dr.tracker,
+            )
+            dr.success, _, dr.results = result  # type: ignore[misc]
+        elif action == "dry_run":
+            result = provision_device(
+                dev, username, password, config, console,
+                headless=True, tracker=dr.tracker, dry_run=True,
             )
             dr.success, _, dr.results = result  # type: ignore[misc]
         elif action == "program":
@@ -586,7 +600,8 @@ def _show_parallel_summary(
                     if s == "fail":
                         detail = f"[red]{detail}[/red]"
                     break
-            table.add_row(str(i + 1), dr.device_label, dr.action.title(), status, detail)
+            action_label = "Provision (Dry Run)" if dr.action == "dry_run" else dr.action.title()
+            table.add_row(str(i + 1), dr.device_label, action_label, status, detail)
 
         console.print(Panel(table, title=title, border_style=border, padding=(1, 2)))
         console.print()
@@ -614,16 +629,21 @@ def _show_parallel_summary(
         _clear()
         _banner()
 
-        success_label = "[bold green]Success[/bold green]" if dr.success else "[bold red]Failed[/bold red]"
-        console.print(
-            Panel(
-                dr.tracker.render_static(),
-                title=f"{dr.device_label} — {success_label}",
-                border_style="green" if dr.success else "red",
-                padding=(1, 2),
+        if dr.action == "dry_run" and dr.results:
+            _show_dry_run_results(
+                console, dr.tracker, dr.results, dr.success, config,
             )
-        )
-        console.print()
+        else:
+            success_label = "[bold green]Success[/bold green]" if dr.success else "[bold red]Failed[/bold red]"
+            console.print(
+                Panel(
+                    dr.tracker.render_static(),
+                    title=f"{dr.device_label} — {success_label}",
+                    border_style="green" if dr.success else "red",
+                    padding=(1, 2),
+                )
+            )
+            console.print()
         _pause()
 
 
@@ -657,7 +677,20 @@ def _flow_manual_setup(config: Config) -> None:
     if net:
         device.network = net
 
-    provision_device(device, username, password, config, console)
+    mode = questionary.select(
+        "Run mode:",
+        choices=[
+            questionary.Choice("Provision (apply changes)", value="provision"),
+            questionary.Choice("Provision (Dry Run)", value="dry_run"),
+        ],
+    ).ask()
+    if not mode:
+        return
+
+    provision_device(
+        device, username, password, config, console,
+        dry_run=(mode == "dry_run"),
+    )
     _pause()
 
 
