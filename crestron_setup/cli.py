@@ -401,7 +401,7 @@ def _flow_discover(config: Config) -> Config:
     if action is None or action == "back":
         return config
 
-    # Select devices
+    # Select devices — single select for IP table, multi-select for others
     device_choices = [
         questionary.Choice(
             f"{dev.ip:<17} {dev.hostname:<20} {dev.model:<12} "
@@ -411,10 +411,19 @@ def _flow_discover(config: Config) -> Config:
         for i, dev in enumerate(devices)
     ]
 
-    selected_indices = questionary.checkbox(
-        "Select devices:",
-        choices=device_choices,
-    ).ask()
+    if action == "iptable":
+        selected_idx = questionary.select(
+            "Select device:",
+            choices=device_choices,
+        ).ask()
+        if selected_idx is None:
+            return config
+        selected_indices = [selected_idx]
+    else:
+        selected_indices = questionary.checkbox(
+            "Select devices:",
+            choices=device_choices,
+        ).ask()
 
     if not selected_indices:
         console.print("[dim]No devices selected.[/dim]")
