@@ -362,9 +362,9 @@ def _flow_discover(config: Config) -> Config:
         return config
 
     # Check first-boot state for each device
-    console.print("Checking first-boot state...")
-    for dev in devices:
-        dev.is_first_boot = CrestronFirstBoot.check_first_boot(dev.ip)
+    with console.status("Checking first-boot state…", spinner="dots"):
+        for dev in devices:
+            dev.is_first_boot = CrestronFirstBoot.check_first_boot(dev.ip)
 
     _header("Discover Devices")
     print_device_table(devices, console)
@@ -728,8 +728,8 @@ def _flow_manual_setup(config: Config) -> None:
     device = Device(ip=host)
 
     # Quick first-boot check
-    console.print("Checking first-boot state...")
-    device.is_first_boot = CrestronFirstBoot.check_first_boot(host)
+    with console.status("Checking first-boot state…", spinner="dots"):
+        device.is_first_boot = CrestronFirstBoot.check_first_boot(host)
     if device.is_first_boot:
         console.print("[cyan][INFO][/cyan] Device appears to be in first-boot mode.")
 
@@ -1101,15 +1101,16 @@ def _flow_firmware_audit(config: Config) -> None:
 
     # Need credentials to read full PUF version via VER -V
     # Check for first-boot devices first
-    console.print("Checking first-boot state…")
+    # Check for first-boot devices first
     first_boot_devices: list[Device] = []
     ready_devices: list[Device] = []
-    for dev in devices:
-        dev.is_first_boot = CrestronFirstBoot.check_first_boot(dev.ip)
-        if dev.is_first_boot:
-            first_boot_devices.append(dev)
-        else:
-            ready_devices.append(dev)
+    with console.status("Checking first-boot state…", spinner="dots"):
+        for dev in devices:
+            dev.is_first_boot = CrestronFirstBoot.check_first_boot(dev.ip)
+            if dev.is_first_boot:
+                first_boot_devices.append(dev)
+            else:
+                ready_devices.append(dev)
 
     if first_boot_devices:
         names = ", ".join(d.ip for d in first_boot_devices)
