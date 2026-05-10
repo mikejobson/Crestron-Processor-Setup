@@ -10,6 +10,7 @@ Cross-platform interactive console for Crestron processor provisioning. Discover
 - **Firmware Management** — Download firmware from configurable URLs and upload to processors
 - **Firmware Audit** — Scan discovered devices, compare firmware versions, report which need updates (read-only)
 - **Batch Provisioning** — Import device lists from CSV or YAML files for bulk provisioning with per-device credentials and profiles
+- **Certificate Management** — Generate CSRs, install CA-signed certs, configure TLS settings, and bulk-deploy wildcard certs
 - **Network Configuration** — Set static IP or DHCP per device during provisioning
 - **Restore & Erase** — Factory-reset devices with `initialize` + `restore` commands
 - **6-Phase Provisioning**:
@@ -147,6 +148,33 @@ devices:
 - `username`, `password`, `profile` are optional — devices without them use shared credentials/profile prompted at runtime
 - Supports both provision and dry-run modes
 - Runs all devices in parallel with live progress display
+
+### Certificate Management
+
+Manage SSL/TLS certificates on Crestron devices from the main menu:
+
+- **View Status** — Shows current SSL mode (SELF/CA), installed webserver, intermediate, and root certificates
+- **Generate CSR** — Creates a Certificate Signing Request on the device with SANs, downloads the `.csr` file via SFTP
+- **Install Certificate** — Uploads `.pem`/`.cer`/`.pfx` files, installs into the correct stores (WEBSERVER, INTERMEDIATE, ROOT), activates CA-signed SSL
+- **Deploy Certificate** — Available from the Discover flow to deploy the same cert (e.g. wildcard) to multiple devices in parallel
+- **SSL/TLS Settings** — Configure minimum TLS version, SSL verification, and self-signed cert auto-reboot
+
+Save CSR defaults in your config to avoid re-entering them for every device:
+
+```yaml
+csr_defaults:
+  country: "GB"
+  state: "England"
+  locality: "London"
+  organization: "Acme Corp"
+  organizational_unit: "AV"
+  email: "av@acme.com"
+
+certificates:
+  cert_file: "/path/to/wildcard.pfx"
+  intermediate_file: "/path/to/intermediate.pem"
+  root_ca_file: "/path/to/root-ca.pem"
+```
 
 ### Configuration Profiles
 

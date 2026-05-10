@@ -337,3 +337,43 @@ def check_ssh_ready(host: str, username: str, password: str,
         return True
     except Exception:
         return False
+
+
+def sftp_download(host: str, username: str, password: str,
+                  remote_path: str, local_dir: str,
+                  console: Console | None = None) -> Path | None:
+    """Download a file via SFTP from the processor.
+
+    Returns the local Path on success, or None on failure.
+    """
+    local_dest = Path(local_dir).expanduser()
+    local_dest.mkdir(parents=True, exist_ok=True)
+    filename = remote_path.rstrip("/").split("/")[-1]
+    local_file = local_dest / filename
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    try:
+        client.connect(
+            host, username=username, password=password,
+            timeout=CONNECT_TIMEOUT, look_for_keys=False, allow_agent=False,
+        )
+        sftp = client.open_sftp()
+
+        if console:
+            console.print(f"  Downloading {remote_path} → {local_file}")
+
+        sftp.get(remote_path, str(local_file))
+        sftp.close()
+
+        if console:
+            console.print(f"[green][OK][/green] Downloaded: {filename}")
+        return local_file
+    except Exception as e:
+        if console:
+            console.print(f"[red][FAIL][/red] SFTP download failed: {e}")
+        return None
+    finally:
+        client.close()
+

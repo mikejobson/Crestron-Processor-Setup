@@ -106,3 +106,21 @@ profiles:
   #   extra_commands:
   #     - command: "SSHD ROOTALIAS OFF"
   #       label: "Disable root alias"
+
+# ─── CSR Defaults ─────────────────────────────────────────────────────────
+# Default values for Certificate Signing Request generation.
+# These are reused across devices so you don't have to type them each time.
+# csr_defaults:
+#   country: "GB"
+#   state: "England"
+#   locality: "London"
+#   organization: "Acme Corp"
+#   organizational_unit: "AV"
+#   email: "av@acme.com"
+
+# ─── Certificate Paths ────────────────────────────────────────────────────
+# File paths for certificate deployment to devices.
+# certificates:
+#   cert_file: "/path/to/wildcard.pfx"       # .pem, .cer, .crt, .pfx, .p12
+#   intermediate_file: "/path/to/intermediate.pem"
+#   root_ca_file: "/path/to/root-ca.pem"
