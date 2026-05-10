@@ -2328,19 +2328,26 @@ def _ip_table_remove_peer(ssh: "CrestronSSH") -> None:
 
 
 def _ip_table_clear(ssh: "CrestronSSH") -> None:
-    """Clear the IP table for a program."""
-    program = questionary.text("Program number to clear:", default="1").ask()
-    if not program:
+    """Clear the IP table."""
+    program = questionary.text(
+        "Program number to clear (leave blank for all):",
+        default="",
+    ).ask()
+    if program is None:
         return
 
+    label = f"program {program}" if program else "all programs"
     confirm = questionary.confirm(
-        f"Clear ALL IP table entries for program {program}?", default=False,
+        f"Clear ALL IP table entries for {label}?", default=False,
     ).ask()
     if not confirm:
         return
 
-    resp = ssh.send_command(f"IPTABLE -C -P:{program}", timeout=10)
-    console.print(f"[cyan][INFO][/cyan] {resp.strip()}")
+    cmd = f"IPTABLE -C -P:{program}" if program else "IPTABLE -C"
+    resp = ssh.send_command(cmd, timeout=10)
+    if resp.strip():
+        console.print(f"[cyan][INFO][/cyan] {resp.strip()}")
+    console.print(f"[green][OK][/green] IP table cleared ({label}).")
     _ip_table_view(ssh)
 
 
