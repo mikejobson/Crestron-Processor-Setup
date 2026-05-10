@@ -72,15 +72,22 @@ def match_profile(model: str, config: Config) -> str | None:
 def _prompt_profile_selection(
     config: Config,
     suggested: str | None = None,
+    show_auto_match: bool = False,
 ) -> str | None:
     """Prompt the user to select a configuration profile.
 
-    Returns profile name or None for default (no profile).
+    Returns profile name, None for default (no profile), or "__auto__"
+    for auto-match by model.
     """
     if not config.profiles:
         return None
 
     choices = []
+    if show_auto_match:
+        choices.append(questionary.Choice(
+            "Auto-match by model (Recommended)",
+            value="__auto__",
+        ))
     if suggested:
         choices.append(questionary.Choice(
             f"{suggested} (suggested)",
@@ -504,6 +511,7 @@ def _flow_discover(config: Config) -> Config:
 
     # Profile selection for provision actions
     profile_name: str | None = None
+    device_profiles: dict[int, str | None] | None = None
     if action in ("provision", "dry_run") and config.profiles:
         # Auto-suggest based on device models
         models = {d.model for d in selected_devices if d.model}
@@ -512,17 +520,53 @@ def _flow_discover(config: Config) -> Config:
             suggested = match_profile(m, config)
             if suggested:
                 break
-        profile_name = _prompt_profile_selection(config, suggested)
+        has_multiple = len(selected_devices) > 1
+        profile_name = _prompt_profile_selection(
+            config, suggested, show_auto_match=has_multiple,
+        )
+
+        if profile_name == "__auto__":
+            # Build per-device profile mapping and show preview
+            device_profiles = {}
+            for i, dev in enumerate(selected_devices):
+                device_profiles[i] = match_profile(dev.model, config) if dev.model else None
+
+            # Show preview table
+            table = Table(
+                title="Profile Auto-Match Preview",
+                border_style="cyan",
+                show_lines=False,
+            )
+            table.add_column("Device", style="cyan", min_width=18)
+            table.add_column("Model", min_width=12)
+            table.add_column("Profile", min_width=15)
+
+            for i, dev in enumerate(selected_devices):
+                host = dev.ip or dev.hostname
+                prof = device_profiles[i] or "[dim]default[/dim]"
+                table.add_row(host, dev.model or "—", prof)
+
+            console.print(table)
+            console.print()
+
+            confirm = questionary.confirm("Proceed with these profile assignments?").ask()
+            if not confirm:
+                return config
+
+            profile_name = None  # Clear — we use device_profiles instead
 
     # ── Single device: run normally with full display ──────────────────
     if len(selected_devices) == 1:
         dev = selected_devices[0]
+        effective_profile = (
+            device_profiles[0] if device_profiles else profile_name
+        )
         if action == "provision":
             provision_device(dev, username, password, config, console,
-                             profile_name=profile_name)
+                             profile_name=effective_profile)
         elif action == "dry_run":
             provision_device(dev, username, password, config, console,
-                             dry_run=True, profile_name=profile_name)
+                             dry_run=True, profile_name=effective_profile)
         elif action == "program":
             host = dev.ip or dev.hostname
             upload_program(host, username, password, program_path, slot, console)
@@ -535,6 +579,7 @@ def _flow_discover(config: Config) -> Config:
     device_results = _run_parallel(
         action, selected_devices, username, password,
         config, program_path, slot, profile_name=profile_name,
+        device_profiles=device_profiles,
     )
     _show_parallel_summary(device_results, config)
     return config
@@ -554,6 +599,7 @@ def _run_parallel(
     program_path: str = "",
     slot: int = 1,
     profile_name: str | None = None,
+    device_profiles: dict[int, str | None] | None = None,
 ) -> list[DeviceResult]:
     """Run an action on multiple devices in parallel with a combined live display."""
     # Pre-create DeviceResult entries with placeholder trackers for display
@@ -582,21 +628,26 @@ def _run_parallel(
 
     display = _ParallelDisplay(device_results)
 
-    def _worker(dev: Device, dr: DeviceResult) -> None:
+    def _worker(idx: int, dev: Device, dr: DeviceResult) -> None:
         """Thread worker — runs action headlessly using dr.tracker for live updates."""
         host = dev.ip or dev.hostname
+        # Use per-device profile if available, else shared profile
+        effective_profile = (
+            device_profiles[idx] if device_profiles and idx in device_profiles
+            else profile_name
+        )
         if action == "provision":
             result = provision_device(
                 dev, username, password, config, console,
                 headless=True, tracker=dr.tracker,
-                profile_name=profile_name,
+                profile_name=effective_profile,
             )
             dr.success, _, dr.results = result  # type: ignore[misc]
         elif action == "dry_run":
             result = provision_device(
                 dev, username, password, config, console,
                 headless=True, tracker=dr.tracker, dry_run=True,
-                profile_name=profile_name,
+                profile_name=effective_profile,
             )
             dr.success, _, dr.results = result  # type: ignore[misc]
         elif action == "program":
@@ -616,8 +667,8 @@ def _run_parallel(
     with Live(display, console=console, refresh_per_second=8) as live:
         with ThreadPoolExecutor(max_workers=len(devices)) as pool:
             futures = [
-                pool.submit(_worker, dev, dr)
-                for dev, dr in zip(devices, device_results)
+                pool.submit(_worker, i, dev, dr)
+                for i, (dev, dr) in enumerate(zip(devices, device_results))
             ]
             # Poll until all futures complete, refreshing display continuously
             while not all(f.done() for f in futures):
