@@ -8,6 +8,7 @@ Cross-platform interactive console for Crestron processor provisioning. Discover
 - **Interactive Console** — Arrow-key menus, checkbox device selection, animated progress tracking
 - **Cross-Platform** — Python + paramiko (works on macOS, Linux, and Windows — no `expect` dependency)
 - **Firmware Management** — Download firmware from configurable URLs and upload to processors
+- **Firmware Audit** — Scan discovered devices, compare firmware versions, report which need updates (read-only)
 - **Network Configuration** — Set static IP or DHCP per device during provisioning
 - **Restore & Erase** — Factory-reset devices with `initialize` + `restore` commands
 - **6-Phase Provisioning**:
