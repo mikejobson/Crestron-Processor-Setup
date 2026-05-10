@@ -6,6 +6,7 @@ import os
 import platform
 import re
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -22,6 +23,153 @@ from .models import Config, FirmwareSource
 
 # Firmware filename pattern: {model}_{version}.puf
 FW_PATTERN = re.compile(r"^(.+?)_([\d.]+)\.puf$", re.IGNORECASE)
+
+
+# --------------------------------------------------------------------------- #
+#  Firmware server API
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class FirmwareServerInfo:
+    """Metadata returned by the firmware server API."""
+
+    version: str
+    filename: str
+    file_hash: str
+    file_size: int
+    download_url: str
+    compatible_models: list[str]
+
+
+def query_firmware_server(
+    model: str, server_url: str
+) -> FirmwareServerInfo | None:
+    """Query the firmware server API for the latest firmware metadata.
+
+    Fetches {server_url}/{MODEL}/latest.json and parses the response.
+    Returns None if the server is not configured, unreachable, or has no
+    firmware for this model.
+    """
+    if not server_url:
+        return None
+
+    url = f"{server_url.rstrip('/')}/{model.upper()}/latest.json"
+    try:
+        resp = httpx.get(url, timeout=15, follow_redirects=True)
+        resp.raise_for_status()
+        data = resp.json()
+        return FirmwareServerInfo(
+            version=data.get("version", ""),
+            filename=data.get("originalFileName", ""),
+            file_hash=data.get("fileHash", ""),
+            file_size=int(data.get("fileSizeBytes", 0)),
+            download_url=data.get("downloadUrl", ""),
+            compatible_models=data.get("compatibleModels", []),
+        )
+    except Exception:
+        return None
+
+
+def download_from_server(
+    info: FirmwareServerInfo,
+    console: Console | None = None,
+) -> Path | None:
+    """Download firmware using the signed URL from the firmware server.
+
+    Verifies the SHA256 hash after download if provided.
+    When console is None, runs silently (used by download_firmware_quiet).
+    Returns the local path or None on failure.
+    """
+    if not info.download_url:
+        return None
+
+    cache = _cache_dir()
+    cache.mkdir(parents=True, exist_ok=True)
+
+    dest_name = info.filename or f"firmware_{info.version}.puf"
+    dest = cache / dest_name
+
+    # Skip download if we already have this exact file
+    if dest.exists() and info.file_hash:
+        existing_hash = _sha256_file(dest)
+        if existing_hash == info.file_hash:
+            if console:
+                console.print(
+                    f"[green][OK][/green] Already cached: {dest.name} (hash verified)"
+                )
+            return dest
+
+    try:
+        if console:
+            console.print(f"Downloading {dest_name}…")
+
+        with httpx.stream(
+            "GET", info.download_url, follow_redirects=True, timeout=300
+        ) as resp:
+            resp.raise_for_status()
+            total = int(resp.headers.get("content-length", 0)) or info.file_size or None
+
+            if console:
+                with Progress(
+                    TextColumn("[bold]{task.description}"),
+                    BarColumn(),
+                    DownloadColumn(),
+                    TransferSpeedColumn(),
+                    console=console,
+                ) as progress:
+                    task = progress.add_task(dest_name, total=total)
+                    with open(dest, "wb") as f:
+                        for chunk in resp.iter_bytes(chunk_size=65536):
+                            f.write(chunk)
+                            progress.advance(task, len(chunk))
+            else:
+                with open(dest, "wb") as f:
+                    for chunk in resp.iter_bytes(chunk_size=65536):
+                        f.write(chunk)
+
+        # Verify hash
+        if info.file_hash:
+            actual_hash = _sha256_file(dest)
+            if actual_hash != info.file_hash:
+                if console:
+                    console.print(
+                        f"[red][FAIL][/red] Hash mismatch — expected {info.file_hash[:16]}…, "
+                        f"got {actual_hash[:16]}…"
+                    )
+                dest.unlink()
+                return None
+
+        if console:
+            console.print(f"[green][OK][/green] Downloaded: {dest.name}")
+            if info.file_hash:
+                console.print(f"  [dim]SHA256 verified[/dim]")
+        return dest
+
+    except httpx.HTTPStatusError as e:
+        if console:
+            console.print(f"[red][FAIL][/red] HTTP {e.response.status_code}: {e}")
+    except httpx.RequestError as e:
+        if console:
+            console.print(f"[red][FAIL][/red] Download failed: {e}")
+    except Exception as e:
+        if console:
+            console.print(f"[red][FAIL][/red] Unexpected error: {e}")
+        if dest.exists():
+            dest.unlink()
+
+    return None
+
+
+def _sha256_file(path: Path) -> str:
+    """Compute SHA256 hex digest of a file."""
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def version_compare(v1: str, v2: str) -> int:
@@ -172,16 +320,30 @@ def download_firmware(
     config: Config,
     console: Console,
 ) -> Path | None:
-    """Download firmware for a model from the configured URL.
+    """Download firmware for a model from the configured sources.
 
-    Returns the local path to the downloaded file, or None on failure.
+    Checks firmware server API first (if configured), then falls back to
+    per-model firmware_urls.  Returns the local path or None on failure.
     """
+    # Try firmware server API first
+    if config.firmware_server:
+        info = query_firmware_server(model, config.firmware_server)
+        if info and info.download_url:
+            console.print(f"[cyan][INFO][/cyan] Firmware server: {model} v{info.version}")
+            result = download_from_server(info, console=console)
+            if result:
+                return result
+            console.print("[yellow][WARN][/yellow] Server download failed, trying direct URL…")
+
+    # Fall back to per-model direct URL
     source = config.firmware_urls.get(model.upper())
     if not source or not source.url:
-        console.print(
-            f"[yellow][WARN][/yellow] No download URL configured for {model}.\n"
-            "  Add one to your config.yaml under firmware_urls."
-        )
+        if not config.firmware_server:
+            console.print(
+                f"[yellow][WARN][/yellow] No download URL configured for {model}.\n"
+                "  Add one to your config.yaml under firmware_urls\n"
+                "  or set firmware_server for API-based downloads."
+            )
         return None
 
     cache = _cache_dir()
@@ -255,8 +417,18 @@ def download_firmware_quiet(
     """Download firmware for a model silently (no console output).
 
     Used during provisioning to auto-download when no local file exists.
+    Checks firmware server API first, then falls back to per-model URLs.
     Returns the local path to the downloaded file, or None on failure.
     """
+    # Try firmware server API first (silent)
+    if config.firmware_server:
+        info = query_firmware_server(model, config.firmware_server)
+        if info and info.download_url:
+            result = download_from_server(info, console=None)
+            if result:
+                return result
+
+    # Fall back to per-model direct URL
     source = config.firmware_urls.get(model.upper())
     if not source or not source.url:
         return None

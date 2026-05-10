@@ -154,6 +154,7 @@ def load_config() -> Config:
         fips_mode=str(data.get("fips_mode", "OFF")).upper(),
         last_program_file=data.get("last_program_file", ""),
         firmware_urls=_parse_firmware_urls(data.get("firmware_urls")),
+        firmware_server=data.get("firmware_server", ""),
         discovery_timeout=int(discovery.get("timeout", 5)),
         discovery_broadcast_count=int(discovery.get("broadcast_count", 3)),
         profiles=_parse_profiles(data.get("profiles")),
@@ -192,6 +193,9 @@ def save_config(config: Config) -> Path:
             "broadcast_count": config.discovery_broadcast_count,
         },
     }
+
+    if config.firmware_server:
+        data["firmware_server"] = config.firmware_server
 
     if config.profiles:
         data["profiles"] = _serialize_profiles(config.profiles)

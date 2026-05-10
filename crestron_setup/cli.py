@@ -860,6 +860,7 @@ def _flow_firmware_audit(config: Config) -> None:
         _parse_puf_metadata,
         download_firmware_quiet,
         find_local_firmware,
+        query_firmware_server,
         version_compare,
     )
     from .ssh import CrestronSSH
@@ -967,26 +968,39 @@ def _flow_firmware_audit(config: Config) -> None:
             result.detail = "Could not read version"
             return result
 
-        # Find available firmware
+        # Find available firmware — check server API first (version only, no download)
         fw_model = dev.model or ""
         if not fw_model:
             result.status = "unknown"
             result.detail = "No model detected"
             return result
 
-        fw_path, fw_version = find_local_firmware(fw_model, config)
-        if not fw_path:
+        fw_version = ""
+        fw_path = None
+
+        # 1. Check firmware server API for version (no download needed)
+        if config.firmware_server:
+            server_info = query_firmware_server(fw_model, config.firmware_server)
+            if server_info:
+                fw_version = server_info.version
+
+        # 2. Check local files
+        if not fw_version:
+            fw_path, fw_version = find_local_firmware(fw_model, config)
+
+        # 3. Try downloading quietly
+        if not fw_version:
             fw_path = download_firmware_quiet(fw_model, config)
             if fw_path:
                 fw_version, _ = _parse_puf_metadata(fw_path)
 
-        if not fw_path or not fw_version:
+        if not fw_version:
             result.status = "unknown"
             result.detail = "No firmware available"
             return result
 
         result.available_version = fw_version
-        result.available_path = fw_path.name
+        result.available_path = fw_path.name if fw_path else "(server)"
 
         cmp = version_compare(fw_version, result.current_version)
         if cmp == 0:
@@ -1223,6 +1237,7 @@ def _flow_settings(config: Config) -> Config:
         console.print(f"  NTP Server:          {config.ntp_server}")
         console.print(f"  Public Key:          {config.pubkey_file}")
         console.print(f"  Firmware Directory:  {config.firmware_dir}")
+        console.print(f"  Firmware Server:     {config.firmware_server or '(not configured)'}")
         console.print(f"  Web Port:            {config.web_port}")
         console.print(f"  Secure Web Port:     {config.secure_web_port}")
         console.print(f"  FIPS Mode:           {config.fips_mode}")
@@ -1265,6 +1280,7 @@ def _edit_setting(config: Config) -> Config:
             questionary.Choice("NTP Server", value="ntp_server"),
             questionary.Choice("Public Key File", value="pubkey_file"),
             questionary.Choice("Firmware Directory", value="firmware_dir"),
+            questionary.Choice("Firmware Server URL", value="firmware_server"),
             questionary.Choice("Web Port", value="web_port"),
             questionary.Choice("Secure Web Port", value="secure_web_port"),
             questionary.Choice("FIPS Mode", value="fips_mode"),

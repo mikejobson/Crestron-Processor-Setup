@@ -46,6 +46,29 @@ firmware_urls:
   # RMC4:
   #   url: "https://example.com/firmware/rmc4_latest.puf"
 
+# ─── Firmware Server API ──────────────────────────────────────────────────
+# Instead of (or in addition to) per-model firmware_urls above, you can
+# configure a firmware server that serves metadata via a JSON API.
+#
+# The app queries:  {firmware_server}/{MODEL}/latest.json
+#
+# Expected JSON response:
+#   {
+#     "version": "2.8006.00284.01",
+#     "originalFileName": "mc4_2.8006.00284.01.puf",
+#     "fileHash": "8377fadb...",           (SHA256 hex digest)
+#     "fileSizeBytes": 318169239,
+#     "compatibleModels": ["MC4"],
+#     "downloadUrl": "https://...signed-url..."
+#   }
+#
+# Benefits over direct URLs:
+#   - Version check without downloading the full .puf file
+#   - SHA256 hash verification after download
+#   - Supports signed/temporary download URLs
+#
+# firmware_server: "https://example.com/api/firmware/public"
+
 # Discovery settings
 discovery:
   timeout: 5 # Seconds to listen for responses

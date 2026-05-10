@@ -162,6 +162,7 @@ def resolve_profile(profile_name: str | None, config: Config) -> ResolvedProfile
         fips_mode=overrides.get("fips_mode", config.fips_mode),
         last_program_file=config.last_program_file,
         firmware_urls=config.firmware_urls,
+        firmware_server=config.firmware_server,
         discovery_timeout=config.discovery_timeout,
         discovery_broadcast_count=config.discovery_broadcast_count,
         profiles=config.profiles,
@@ -192,6 +193,7 @@ class Config:
     fips_mode: str = "OFF"
     last_program_file: str = ""
     firmware_urls: dict[str, FirmwareSource] = field(default_factory=dict)
+    firmware_server: str = ""
     discovery_timeout: int = 5
     discovery_broadcast_count: int = 3
     profiles: dict[str, Profile] = field(default_factory=dict)

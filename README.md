@@ -99,6 +99,24 @@ Copy `config.example.yaml` to get started. Key settings:
 | `web_port`        | `8080`                     | Web server port                                                          |
 | `secure_web_port` | `8443`                     | Secure web server port                                                   |
 | `firmware_urls`   | _(empty)_                  | Per-model firmware download URLs                                         |
+| `firmware_server` | _(empty)_                  | Firmware server API base URL (see below)                                 |
+
+### Firmware Server API
+
+If you have a firmware server that exposes a JSON metadata API, set `firmware_server` to the base URL. The app queries `{firmware_server}/{MODEL}/latest.json` and expects:
+
+```json
+{
+  "version": "2.8006.00284.01",
+  "originalFileName": "mc4_2.8006.00284.01.puf",
+  "fileHash": "8377fadbb1318853...",
+  "fileSizeBytes": 318169239,
+  "compatibleModels": ["MC4"],
+  "downloadUrl": "https://storage.googleapis.com/...signed-url..."
+}
+```
+
+This enables version comparison without downloading the full firmware file, and verifies the SHA256 hash after download. The server is checked before falling back to per-model `firmware_urls`.
 
 ### Configuration Profiles
 
