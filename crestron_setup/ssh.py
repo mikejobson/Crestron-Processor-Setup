@@ -7,6 +7,7 @@ detection — exec_command() will not work.
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from pathlib import Path
@@ -280,6 +281,35 @@ def _read_until(channel: paramiko.Channel, markers: list[bytes],
     return buf
 
 
+def _detect_agent_socket() -> str | None:
+    """Detect the SSH agent socket, checking ~/.ssh/config IdentityAgent.
+
+    Paramiko only reads SSH_AUTH_SOCK, but many tools (1Password, Secretive)
+    configure their agent via IdentityAgent in ~/.ssh/config.  We parse that
+    directive and return the socket path if it exists.
+    """
+    ssh_config_path = Path.home() / ".ssh" / "config"
+    if not ssh_config_path.exists():
+        return None
+
+    try:
+        text = ssh_config_path.read_text(errors="ignore")
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.lower().startswith("identityagent"):
+                # IdentityAgent "~/Library/..." or IdentityAgent ~/Library/...
+                parts = stripped.split(None, 1)
+                if len(parts) < 2:
+                    continue
+                sock = parts[1].strip('"').strip("'")
+                sock = os.path.expanduser(sock)
+                if os.path.exists(sock):
+                    return sock
+    except Exception:
+        pass
+    return None
+
+
 def _connect_client(
     client: paramiko.SSHClient,
     host: str,
@@ -288,8 +318,19 @@ def _connect_client(
     timeout: int = CONNECT_TIMEOUT,
     use_key_auth: bool = False,
 ) -> None:
-    """Connect a paramiko SSHClient, trying key auth first if enabled."""
+    """Connect a paramiko SSHClient, trying key auth first if enabled.
+
+    When use_key_auth is True, detects custom SSH agent sockets (e.g.
+    1Password, Secretive) from ~/.ssh/config IdentityAgent directive,
+    then tries agent + key file auth before falling back to password.
+    """
     if use_key_auth:
+        # Detect custom agent sockets (1Password, Secretive, etc.)
+        custom_sock = _detect_agent_socket()
+        old_sock = os.environ.get("SSH_AUTH_SOCK", "")
+        if custom_sock:
+            os.environ["SSH_AUTH_SOCK"] = custom_sock
+
         try:
             client.connect(
                 host, username=username, timeout=timeout,
@@ -298,6 +339,9 @@ def _connect_client(
             return
         except (paramiko.AuthenticationException, Exception):
             pass  # Fall through to password auth
+        finally:
+            if custom_sock:
+                os.environ["SSH_AUTH_SOCK"] = old_sock
 
     client.connect(
         host, username=username, password=password,
