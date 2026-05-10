@@ -7,6 +7,7 @@ import select
 import sys
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 
 try:
     import termios
@@ -312,6 +313,7 @@ def main() -> None:
             questionary.Choice("Upload Program", value="program"),
             questionary.Choice("Firmware Audit", value="fw_audit"),
             questionary.Choice("Certificate Management", value="certs"),
+            questionary.Choice("IP Table Management", value="iptable"),
             questionary.Choice("Restore & Erase Device", value="restore"),
             questionary.Choice("Download Firmware", value="firmware"),
             questionary.Choice("Clear Firmware Cache", value="cache"),
@@ -344,6 +346,8 @@ def main() -> None:
             _flow_firmware_audit(config)
         elif choice == "certs":
             config = _flow_cert_management(config)
+        elif choice == "iptable":
+            config = _flow_ip_table(config)
         elif choice == "firmware":
             _flow_firmware(config)
         elif choice == "cache":
@@ -387,6 +391,7 @@ def _flow_discover(config: Config) -> Config:
             questionary.Choice("Provision", value="provision"),
             questionary.Choice("Provision (Dry Run)", value="dry_run"),
             questionary.Choice("Deploy Certificate", value="deploy_cert"),
+            questionary.Choice("IP Table", value="iptable"),
             questionary.Choice("Upload Program", value="program"),
             questionary.Choice("Restore & Erase", value="restore"),
             questionary.Choice("Back to Main Menu", value="back"),
@@ -582,6 +587,10 @@ def _flow_discover(config: Config) -> Config:
             upload_program(host, username, password, program_path, slot, console)
         elif action == "restore":
             restore_device(dev, username, password, console)
+        elif action == "iptable":
+            _flow_ip_table(config, host=dev.ip or dev.hostname,
+                           username=username, password=password)
+            return config
         _pause()
         return config
 
@@ -2094,8 +2103,329 @@ def _flow_bulk_deploy_cert(
 
 
 # --------------------------------------------------------------------------- #
-#  Settings flow
+#  IP Table Management flow
 # --------------------------------------------------------------------------- #
+
+
+@dataclass
+class _IPTableEntry:
+    """Parsed IP table row."""
+    cip_id: int
+    entry_type: str
+    status: str
+    dev_id: str
+    port: str
+    address: str
+    model: str
+    description: str
+    room_id: str
+
+
+def _parse_ipt_output(raw: str) -> list[_IPTableEntry]:
+    """Parse pipe-delimited output from IPT -T into structured entries."""
+    entries: list[_IPTableEntry] = []
+    lines = raw.splitlines()
+    in_data = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("---"):
+            in_data = True
+            continue
+        if not in_data:
+            continue
+        if not stripped or "|" not in stripped:
+            continue
+        parts = [p.strip() for p in stripped.split("|")]
+        if len(parts) < 6:
+            continue
+        try:
+            cip_id = int(parts[0])
+        except (ValueError, IndexError):
+            continue
+        entries.append(_IPTableEntry(
+            cip_id=cip_id,
+            entry_type=parts[1] if len(parts) > 1 else "",
+            status=parts[2] if len(parts) > 2 else "",
+            dev_id=parts[3] if len(parts) > 3 else "",
+            port=parts[4] if len(parts) > 4 else "",
+            address=parts[5] if len(parts) > 5 else "",
+            model=parts[6] if len(parts) > 6 else "",
+            description=parts[7] if len(parts) > 7 else "",
+            room_id=parts[8] if len(parts) > 8 else "",
+        ))
+    return entries
+
+
+def _display_ip_table(entries: list[_IPTableEntry], title: str = "IP Table") -> None:
+    """Display parsed IP table entries in a rich table."""
+    if not entries:
+        console.print(f"\n[dim]{title}: No entries[/dim]\n")
+        return
+
+    table = Table(title=title, border_style="cyan", show_lines=False)
+    table.add_column("CIP ID", style="bold", justify="right")
+    table.add_column("Type")
+    table.add_column("Status")
+    table.add_column("Address / Hostname")
+    table.add_column("Port", justify="right")
+    table.add_column("Model")
+    table.add_column("Description")
+
+    online = 0
+    for e in entries:
+        if e.status.upper() == "ONLINE":
+            status_str = "[green]ONLINE[/green]"
+            online += 1
+        elif e.status.upper() == "OFFLINE":
+            status_str = "[red]OFFLINE[/red]"
+        else:
+            status_str = f"[dim]{e.status}[/dim]"
+
+        table.add_row(
+            str(e.cip_id),
+            e.entry_type,
+            status_str,
+            e.address,
+            e.port,
+            e.model or "[dim]—[/dim]",
+            e.description or "[dim]—[/dim]",
+        )
+
+    console.print()
+    console.print(table)
+    total = len(entries)
+    console.print(
+        f"[dim]  {total} {'entry' if total == 1 else 'entries'}, "
+        f"{online} online[/dim]\n"
+    )
+
+
+def _ip_table_view(ssh: "CrestronSSH") -> None:
+    """Read and display the full IP table."""
+    raw = ssh.send_command("IPT -T", timeout=15)
+    entries = _parse_ipt_output(raw)
+    _display_ip_table(entries)
+
+
+def _ip_table_add_master(ssh: "CrestronSSH") -> None:
+    """Add a master entry to the IP table."""
+    cip_id = questionary.text("CIP ID (e.g. 3):").ask()
+    if not cip_id:
+        return
+    try:
+        int(cip_id)
+    except ValueError:
+        console.print("[red][FAIL][/red] CIP ID must be a number.")
+        return
+
+    address = questionary.text("Hostname or IP address:").ask()
+    if not address:
+        return
+
+    resp = ssh.send_command(f"ADDM {cip_id} {address}", timeout=10)
+    if "set" in resp.lower():
+        console.print(f"[green][OK][/green] Master entry added: ID {cip_id} → {address}")
+    else:
+        console.print(f"[yellow][WARN][/yellow] Response: {resp.strip()}")
+
+    # Show updated table
+    _ip_table_view(ssh)
+
+
+def _ip_table_remove_master(ssh: "CrestronSSH") -> None:
+    """Remove master entries from the IP table."""
+    raw = ssh.send_command("IPT -T", timeout=15)
+    entries = _parse_ipt_output(raw)
+    # Filter to gateway/master type entries
+    masters = [e for e in entries if e.entry_type.upper() in ("GWAY", "MASTER", "GATEWAY")]
+    if not masters:
+        console.print("[dim]No master entries found.[/dim]")
+        return
+
+    choices = [
+        questionary.Choice(
+            f"ID {e.cip_id:>3}  {e.address:<40}  {e.status}",
+            value=e,
+        )
+        for e in masters
+    ]
+    selected = questionary.checkbox(
+        "Select entries to remove:", choices=choices,
+    ).ask()
+    if not selected:
+        return
+
+    for entry in selected:
+        # Extract hostname/IP — address field may be "hostname(ip)"
+        addr = entry.address.split("(")[0].strip() if "(" in entry.address else entry.address
+        resp = ssh.send_command(f"REMM {entry.cip_id} {addr}", timeout=10)
+        if "set" in resp.lower():
+            console.print(f"[green][OK][/green] Removed: ID {entry.cip_id} — {addr}")
+        else:
+            console.print(f"[yellow][WARN][/yellow] ID {entry.cip_id}: {resp.strip()}")
+
+    _ip_table_view(ssh)
+
+
+def _ip_table_add_peer(ssh: "CrestronSSH") -> None:
+    """Add a peer entry to the IP table."""
+    cip_id = questionary.text("CIP ID (e.g. 3):").ask()
+    if not cip_id:
+        return
+    try:
+        int(cip_id)
+    except ValueError:
+        console.print("[red][FAIL][/red] CIP ID must be a number.")
+        return
+
+    address = questionary.text("Hostname or IP address:").ask()
+    if not address:
+        return
+
+    program = questionary.text("Program number:", default="1").ask()
+    if not program:
+        return
+
+    resp = ssh.send_command(f"ADDPEER {cip_id} {address} -P:{program}", timeout=10)
+    console.print(f"[cyan][INFO][/cyan] {resp.strip()}")
+
+    _ip_table_view(ssh)
+
+
+def _ip_table_remove_peer(ssh: "CrestronSSH") -> None:
+    """Remove peer entries from the IP table."""
+    raw = ssh.send_command("IPT -T", timeout=15)
+    entries = _parse_ipt_output(raw)
+    # Filter to non-master entries
+    peers = [e for e in entries if e.entry_type.upper() not in ("GWAY", "MASTER", "GATEWAY")]
+    if not peers:
+        console.print("[dim]No peer entries found.[/dim]")
+        return
+
+    choices = [
+        questionary.Choice(
+            f"ID {e.cip_id:>3}  {e.address:<40}  {e.status}  ({e.entry_type})",
+            value=e,
+        )
+        for e in peers
+    ]
+    selected = questionary.checkbox(
+        "Select entries to remove:", choices=choices,
+    ).ask()
+    if not selected:
+        return
+
+    program = questionary.text("Program number:", default="1").ask()
+    if not program:
+        return
+
+    for entry in selected:
+        addr = entry.address.split("(")[0].strip() if "(" in entry.address else entry.address
+        resp = ssh.send_command(f"REMPEER {entry.cip_id} {addr} -P:{program}", timeout=10)
+        console.print(f"[cyan][INFO][/cyan] ID {entry.cip_id}: {resp.strip()}")
+
+    _ip_table_view(ssh)
+
+
+def _ip_table_clear(ssh: "CrestronSSH") -> None:
+    """Clear the IP table for a program."""
+    program = questionary.text("Program number to clear:", default="1").ask()
+    if not program:
+        return
+
+    confirm = questionary.confirm(
+        f"Clear ALL IP table entries for program {program}?", default=False,
+    ).ask()
+    if not confirm:
+        return
+
+    resp = ssh.send_command(f"IPTABLE -C -P:{program}", timeout=10)
+    console.print(f"[cyan][INFO][/cyan] {resp.strip()}")
+    _ip_table_view(ssh)
+
+
+def _ip_table_save(ssh: "CrestronSSH") -> None:
+    """Save IP table to flash."""
+    resp = ssh.send_command("SENDIPTABLE", timeout=15)
+    console.print(f"[green][OK][/green] IP table saved to flash.")
+    if resp.strip():
+        console.print(f"[dim]{resp.strip()}[/dim]")
+
+
+def _flow_ip_table(config: Config, host: str | None = None,
+                   username: str | None = None,
+                   password: str | None = None) -> Config:
+    """IP Table Management submenu with persistent SSH connection."""
+    from .ssh import CrestronSSH
+
+    _header("IP Table Management")
+
+    if not host:
+        host = questionary.text("Processor hostname or IP:").ask()
+        if not host:
+            return config
+
+    if not username or not password:
+        creds = _prompt_credentials()
+        if not creds:
+            return config
+        username, password = creds
+
+    # Connect once, keep alive for the session
+    try:
+        ssh = CrestronSSH(host, username, password)
+    except Exception as e:
+        console.print(f"[red][FAIL][/red] Connection failed: {e}")
+        _pause()
+        return config
+
+    console.print(f"[green][OK][/green] Connected to {host} ({ssh.model})\n")
+
+    try:
+        while True:
+            choice = questionary.select(
+                f"IP Table — {host}",
+                choices=[
+                    questionary.Choice("View IP Table", value="view"),
+                    questionary.Choice("Add Master Entry", value="add_master"),
+                    questionary.Choice("Remove Master Entry", value="rem_master"),
+                    questionary.Choice("Add Peer Entry", value="add_peer"),
+                    questionary.Choice("Remove Peer Entry", value="rem_peer"),
+                    questionary.Choice("Clear IP Table", value="clear"),
+                    questionary.Choice("Save to Flash", value="save"),
+                    questionary.Choice("Back", value="back"),
+                ],
+            ).ask()
+
+            if choice is None or choice == "back":
+                break
+
+            try:
+                if choice == "view":
+                    _ip_table_view(ssh)
+                elif choice == "add_master":
+                    _ip_table_add_master(ssh)
+                elif choice == "rem_master":
+                    _ip_table_remove_master(ssh)
+                elif choice == "add_peer":
+                    _ip_table_add_peer(ssh)
+                elif choice == "rem_peer":
+                    _ip_table_remove_peer(ssh)
+                elif choice == "clear":
+                    _ip_table_clear(ssh)
+                elif choice == "save":
+                    _ip_table_save(ssh)
+            except Exception as e:
+                console.print(f"[red][FAIL][/red] {e}")
+
+            _pause()
+    finally:
+        try:
+            ssh.disconnect()
+        except Exception:
+            pass
+
+    return config
 
 
 def _flow_settings(config: Config) -> Config:

@@ -11,6 +11,7 @@ Cross-platform interactive console for Crestron processor provisioning. Discover
 - **Firmware Audit** — Scan discovered devices, compare firmware versions, report which need updates (read-only)
 - **Batch Provisioning** — Import device lists from CSV or YAML files for bulk provisioning with per-device credentials and profiles
 - **Certificate Management** — Generate CSRs, install CA-signed certs, configure TLS settings, and bulk-deploy wildcard certs
+- **IP Table Management** — View, add, remove, and clear master/peer CIP entries on a device with an interactive submenu
 - **Network Configuration** — Set static IP or DHCP per device during provisioning
 - **Restore & Erase** — Factory-reset devices with `initialize` + `restore` commands
 - **6-Phase Provisioning**:
@@ -175,6 +176,18 @@ certificates:
   intermediate_file: "/path/to/intermediate.pem"
   root_ca_file: "/path/to/root-ca.pem"
 ```
+
+### IP Table Management
+
+View and manage CIP IP table entries on a device. Available from the main menu ("IP Table Management") or the Discover flow ("IP Table" action on a single device).
+
+- **View IP Table** — Shows all entries in a formatted table with coloured online/offline status
+- **Add Master Entry** — Add a master (gateway) entry with CIP ID and hostname or IP
+- **Remove Master Entry** — Select entries to remove from a checkbox list
+- **Add Peer Entry** — Add a peer entry with CIP ID, hostname/IP, and program number
+- **Remove Peer Entry** — Select peer entries to remove
+- **Clear IP Table** — Clear all entries for a program (with confirmation)
+- **Save to Flash** — Persist changes so they survive reboots
 
 ### Configuration Profiles
 
