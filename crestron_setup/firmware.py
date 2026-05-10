@@ -21,8 +21,9 @@ from rich.progress import (
 
 from .models import Config, FirmwareSource
 
-# Firmware filename pattern: {model}_{version}.puf
+# Firmware filename pattern: {model}_{version}.puf or .zip
 FW_PATTERN = re.compile(r"^(.+?)_([\d.]+)\.puf$", re.IGNORECASE)
+FW_ZIP_PATTERN = re.compile(r"^(.+?)_([\d.]+(?:_r\d+)?)\.zip$", re.IGNORECASE)
 
 
 # --------------------------------------------------------------------------- #
@@ -231,39 +232,68 @@ def clear_cache(paths: list[Path] | None = None) -> int:
 
 
 def _parse_puf_metadata(puf_path: Path) -> tuple[str, list[str]]:
-    """Read ~.package.ini from a PUF (ZIP) file.
+    """Read firmware metadata from a PUF or ZIP firmware file.
+
+    PUF files contain ~.package.ini with DeviceSelectionLogic lines.
+    ZIP firmware files contain ~info.ini with Version= and Targets= lines.
 
     Returns (version, supported_models) where supported_models is a list
-    of model strings from all DeviceSelectionLogic lines.
+    of model strings.
     """
     version = ""
     models: list[str] = []
 
     try:
         with zipfile.ZipFile(puf_path, "r") as zf:
-            ini_names = [n for n in zf.namelist() if n.endswith(".package.ini")]
-            if not ini_names:
+            names = zf.namelist()
+
+            # Try PUF-style ~.package.ini first
+            ini_names = [n for n in names if n.endswith(".package.ini")]
+            if ini_names:
+                ini_text = zf.read(ini_names[0]).decode("utf-8", errors="replace")
+
+                for line in ini_text.splitlines():
+                    line = line.strip()
+
+                    # Version=3.003.0015.001
+                    if line.lower().startswith("version=") and not version:
+                        version = line.split("=", 1)[1].strip()
+
+                    # DeviceSelectionLogic=model_is_one_of,TSW-570,TS-770,...
+                    if "deviceselectionlogic" in line.lower() and "model_is_one_of" in line.lower():
+                        parts = line.split("=", 1)
+                        if len(parts) == 2:
+                            tokens = parts[1].split(",")
+                            for token in tokens[1:]:
+                                m = token.strip()
+                                if m and m.upper() not in [x.upper() for x in models]:
+                                    models.append(m)
+
                 return version, models
 
-            ini_text = zf.read(ini_names[0]).decode("utf-8", errors="replace")
+            # Try ZIP firmware-style ~info.ini (e.g. NVX devices)
+            info_names = [n for n in names if n.lower().endswith("info.ini")]
+            if info_names:
+                ini_text = zf.read(info_names[0]).decode("utf-8", errors="replace")
 
-            for line in ini_text.splitlines():
-                line = line.strip()
+                for line in ini_text.splitlines():
+                    line = line.strip()
+                    if line.startswith("//"):
+                        continue
 
-                # Version=3.003.0015.001
-                if line.lower().startswith("version=") and not version:
-                    version = line.split("=", 1)[1].strip()
+                    # Version=7.4.0255.22319
+                    if line.lower().startswith("version=") and not version:
+                        version = line.split("=", 1)[1].strip()
 
-                # DeviceSelectionLogic=model_is_one_of,TSW-570,TS-770,...
-                if "deviceselectionlogic" in line.lower() and "model_is_one_of" in line.lower():
-                    parts = line.split("=", 1)
-                    if len(parts) == 2:
-                        tokens = parts[1].split(",")
-                        # Skip the first token ("model_is_one_of")
-                        for token in tokens[1:]:
-                            m = token.strip()
-                            if m and m.upper() not in [x.upper() for x in models]:
-                                models.append(m)
+                    # Targets=DM-NVX-384,DM-NVX-384C,DM-NVX-385,DM-NVX-385C
+                    if line.lower().startswith("targets="):
+                        targets = line.split("=", 1)[1].strip()
+                        for t in targets.split(","):
+                            t = t.strip()
+                            if t and t.upper() not in [x.upper() for x in models]:
+                                models.append(t)
+
+                return version, models
 
     except (zipfile.BadZipFile, OSError, KeyError):
         pass
@@ -292,10 +322,10 @@ def find_local_firmware(
         if not search_dir.exists():
             continue
         for f in search_dir.iterdir():
-            if not f.is_file() or not f.suffix.lower() == ".puf":
+            if not f.is_file() or f.suffix.lower() not in (".puf", ".zip"):
                 continue
 
-            # Try INI-based matching first
+            # Try INI-based matching first (works for both PUF and ZIP firmware)
             version, supported = _parse_puf_metadata(f)
             if supported:
                 if model_upper in [m.upper() for m in supported]:
@@ -306,6 +336,12 @@ def find_local_firmware(
             m = FW_PATTERN.match(f.name)
             if m and m.group(1).lower() == model.lower():
                 candidates.append((f, m.group(2)))
+                continue
+
+            # Try ZIP firmware filename pattern
+            m = FW_ZIP_PATTERN.match(f.name)
+            if m and m.group(1).lower() == model.lower():
+                candidates.append((f, m.group(2).split("_")[0]))
 
     if not candidates:
         return None, ""
@@ -351,7 +387,7 @@ def download_firmware(
 
     # Derive initial filename from URL (may be overridden by Content-Disposition)
     url_filename = source.url.rstrip("/").split("/")[-1]
-    if not url_filename.lower().endswith(".puf"):
+    if not url_filename.lower().endswith((".puf", ".zip")):
         url_filename = f"{model.lower()}_latest.puf"
 
     console.print(f"Downloading firmware for {model}...")
@@ -377,7 +413,7 @@ def download_firmware(
                     from urllib.parse import unquote
                     real_name = unquote(m.group(1)).strip()
 
-            dest_name = real_name if real_name and real_name.lower().endswith(".puf") else url_filename
+            dest_name = real_name if real_name and real_name.lower().endswith((".puf", ".zip")) else url_filename
             dest = cache / dest_name
             console.print(f"  Dest: {dest}")
 
@@ -437,7 +473,7 @@ def download_firmware_quiet(
     cache.mkdir(parents=True, exist_ok=True)
 
     url_filename = source.url.rstrip("/").split("/")[-1]
-    if not url_filename.lower().endswith(".puf"):
+    if not url_filename.lower().endswith((".puf", ".zip")):
         url_filename = f"{model.lower()}_latest.puf"
 
     try:
@@ -458,7 +494,7 @@ def download_firmware_quiet(
                     from urllib.parse import unquote
                     real_name = unquote(m.group(1)).strip()
 
-            dest_name = real_name if real_name and real_name.lower().endswith(".puf") else url_filename
+            dest_name = real_name if real_name and real_name.lower().endswith((".puf", ".zip")) else url_filename
             dest = cache / dest_name
 
             with open(dest, "wb") as f:
