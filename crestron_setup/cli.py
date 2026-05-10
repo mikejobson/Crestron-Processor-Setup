@@ -6,7 +6,7 @@ import os
 import select
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 
 try:
     import termios
@@ -36,9 +36,21 @@ from .provisioning import (
 )
 from .ssh import CrestronFirstBoot
 from .timezones import timezone_choices, timezone_label
+from .updater import (
+    InstallMethod,
+    can_self_update,
+    check_for_update,
+    detect_install_method,
+    self_update,
+    update_instructions,
+)
 from . import __version__
 
 console = Console()
+
+# Populated by background update check at startup
+_update_info: tuple[str, str] | None = None
+_install_method: InstallMethod = InstallMethod.DEV
 
 
 def _clear() -> None:
@@ -202,6 +214,12 @@ def _banner() -> None:
             padding=(0, 2),
         )
     )
+    if _update_info:
+        latest, _ = _update_info
+        console.print(
+            f"  [yellow]Update available:[/yellow] v{latest}  "
+            f"[dim]({update_instructions(_install_method)})[/dim]"
+        )
     console.print()
 
 
@@ -221,27 +239,43 @@ def _pause() -> None:
 
 def main() -> None:
     """Entry point for the Crestron setup console."""
+    global _update_info, _install_method
     config = load_config()
 
+    # Start update check in background so it doesn't slow startup
+    _install_method = detect_install_method()
+    update_future: Future = ThreadPoolExecutor(1).submit(check_for_update)
+
     _splash()
+
+    # Collect result after splash (should be done by now)
+    if _update_info is None:
+        try:
+            _update_info = update_future.result(timeout=2)
+        except Exception:
+            pass
 
     while True:
         _clear()
         _banner()
 
-        choice = questionary.select(
-            "Main Menu",
-            choices=[
-                questionary.Choice("Discover Devices", value="discover"),
-                questionary.Choice("Setup Device (manual IP)", value="setup"),
-                questionary.Choice("Upload Program", value="program"),
-                questionary.Choice("Restore & Erase Device", value="restore"),
-                questionary.Choice("Download Firmware", value="firmware"),
-                questionary.Choice("Clear Firmware Cache", value="cache"),
-                questionary.Choice("Settings", value="settings"),
-                questionary.Choice("Exit", value="exit"),
-            ],
-        ).ask()
+        menu_choices = [
+            questionary.Choice("Discover Devices", value="discover"),
+            questionary.Choice("Setup Device (manual IP)", value="setup"),
+            questionary.Choice("Upload Program", value="program"),
+            questionary.Choice("Restore & Erase Device", value="restore"),
+            questionary.Choice("Download Firmware", value="firmware"),
+            questionary.Choice("Clear Firmware Cache", value="cache"),
+            questionary.Choice("Settings", value="settings"),
+        ]
+        if _update_info and can_self_update(_install_method):
+            latest, _ = _update_info
+            menu_choices.append(
+                questionary.Choice(f"Update Now (v{latest})", value="update")
+            )
+        menu_choices.append(questionary.Choice("Exit", value="exit"))
+
+        choice = questionary.select("Main Menu", choices=menu_choices).ask()
 
         if choice is None or choice == "exit":
             _clear()
@@ -261,6 +295,8 @@ def main() -> None:
             _flow_clear_cache()
         elif choice == "settings":
             config = _flow_settings(config)
+        elif choice == "update":
+            _flow_update()
 
 
 # --------------------------------------------------------------------------- #
@@ -811,6 +847,40 @@ def _flow_clear_cache() -> None:
             console.print("[dim]No files selected.[/dim]")
 
     _pause()
+
+
+# --------------------------------------------------------------------------- #
+#  Update flow
+# --------------------------------------------------------------------------- #
+
+
+def _flow_update() -> None:
+    """Self-update the application binary."""
+    global _update_info
+    _header("Update")
+
+    if not _update_info:
+        console.print("[green]Already up to date.[/green]")
+        _pause()
+        return
+
+    latest, url = _update_info
+    console.print(f"[cyan][INFO][/cyan] Current version: v{__version__}")
+    console.print(f"[cyan][INFO][/cyan] Latest version:  v{latest}")
+    console.print(f"[cyan][INFO][/cyan] Release: {url}")
+    console.print()
+
+    confirm = questionary.confirm(
+        f"Download and install v{latest}?", default=True
+    ).ask()
+    if not confirm:
+        return
+
+    if self_update(console):
+        _update_info = None  # Clear notification after successful update
+        _pause()
+    else:
+        _pause()
 
 
 # --------------------------------------------------------------------------- #
