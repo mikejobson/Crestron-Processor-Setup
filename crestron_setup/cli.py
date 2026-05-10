@@ -922,6 +922,7 @@ def _flow_firmware_audit(config: Config) -> None:
         current_version: str = ""
         available_version: str = ""
         available_path: str = ""
+        source: str = ""  # where available firmware was found
         status: str = ""
         detail: str = ""
 
@@ -977,22 +978,28 @@ def _flow_firmware_audit(config: Config) -> None:
 
         fw_version = ""
         fw_path = None
+        fw_source = ""
 
         # 1. Check firmware server API for version (no download needed)
         if config.firmware_server:
             server_info = query_firmware_server(fw_model, config.firmware_server)
             if server_info:
                 fw_version = server_info.version
+                fw_source = "server"
 
         # 2. Check local files
         if not fw_version:
             fw_path, fw_version = find_local_firmware(fw_model, config)
+            if fw_version:
+                fw_source = "local"
 
         # 3. Try downloading quietly
         if not fw_version:
             fw_path = download_firmware_quiet(fw_model, config)
             if fw_path:
                 fw_version, _ = _parse_puf_metadata(fw_path)
+                # download_firmware_quiet tries server first, then direct URL
+                fw_source = "downloaded"
 
         if not fw_version:
             result.status = "unknown"
@@ -1001,6 +1008,7 @@ def _flow_firmware_audit(config: Config) -> None:
 
         result.available_version = fw_version
         result.available_path = fw_path.name if fw_path else "(server)"
+        result.source = fw_source
 
         cmp = version_compare(fw_version, result.current_version)
         if cmp == 0:
@@ -1040,12 +1048,21 @@ def _flow_firmware_audit(config: Config) -> None:
     table.add_column("Model", min_width=10)
     table.add_column("Current", min_width=16)
     table.add_column("Available", min_width=16)
+    table.add_column("Source", min_width=10)
     table.add_column("Status", min_width=18)
 
     for r in results:
         host = r.device.ip or r.device.hostname
         model = r.device.model or "—"
         current = r.current_version or "—"
+
+        # Format source label
+        source_labels = {
+            "server": "[cyan]Server API[/cyan]",
+            "local": "[green]Local[/green]",
+            "downloaded": "[yellow]Downloaded[/yellow]",
+        }
+        source = source_labels.get(r.source, "—")
 
         if r.status == "update-available":
             available = f"[yellow]{r.available_version}[/yellow]"
@@ -1066,7 +1083,7 @@ def _flow_firmware_audit(config: Config) -> None:
             available = "—"
             status = f"[dim]{r.detail}[/dim]"
 
-        table.add_row(host, model, current, available, status)
+        table.add_row(host, model, current, available, source, status)
 
     console.print(table)
     console.print()
