@@ -166,6 +166,8 @@ def resolve_profile(profile_name: str | None, config: Config) -> ResolvedProfile
         discovery_timeout=config.discovery_timeout,
         discovery_broadcast_count=config.discovery_broadcast_count,
         profiles=config.profiles,
+        csr_defaults=config.csr_defaults,
+        certificates=config.certificates,
     )
 
     return ResolvedProfile(
@@ -174,6 +176,27 @@ def resolve_profile(profile_name: str | None, config: Config) -> ResolvedProfile
         skipped=skipped,
         extra_commands=extras,
     )
+
+
+@dataclass
+class CsrDefaults:
+    """Default values for CSR generation, reused across devices."""
+
+    country: str = ""
+    state: str = ""
+    locality: str = ""
+    organization: str = ""
+    organizational_unit: str = ""
+    email: str = ""
+
+
+@dataclass
+class CertificateConfig:
+    """Certificate file paths for bulk deployment."""
+
+    cert_file: str = ""           # Path to .pem/.cer/.pfx cert file
+    intermediate_file: str = ""   # Path to intermediate CA cert
+    root_ca_file: str = ""        # Path to root CA cert
 
 
 @dataclass
@@ -197,3 +220,5 @@ class Config:
     discovery_timeout: int = 5
     discovery_broadcast_count: int = 3
     profiles: dict[str, Profile] = field(default_factory=dict)
+    csr_defaults: CsrDefaults = field(default_factory=CsrDefaults)
+    certificates: CertificateConfig = field(default_factory=CertificateConfig)

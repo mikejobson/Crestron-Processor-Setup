@@ -8,7 +8,15 @@ from pathlib import Path
 
 import yaml
 
-from .models import Config, ExtraCommand, FirmwareSource, Profile, SKIP
+from .models import (
+    CertificateConfig,
+    Config,
+    CsrDefaults,
+    ExtraCommand,
+    FirmwareSource,
+    Profile,
+    SKIP,
+)
 
 APP_NAME = "crestron-setup"
 
@@ -140,6 +148,25 @@ def load_config() -> Config:
 
     discovery = data.get("discovery", {})
 
+    # Parse CSR defaults
+    csr_raw = data.get("csr_defaults", {})
+    csr_defaults = CsrDefaults(
+        country=csr_raw.get("country", ""),
+        state=csr_raw.get("state", ""),
+        locality=csr_raw.get("locality", ""),
+        organization=csr_raw.get("organization", ""),
+        organizational_unit=csr_raw.get("organizational_unit", ""),
+        email=csr_raw.get("email", ""),
+    ) if csr_raw else CsrDefaults()
+
+    # Parse certificate config
+    cert_raw = data.get("certificates", {})
+    certificates = CertificateConfig(
+        cert_file=cert_raw.get("cert_file", ""),
+        intermediate_file=cert_raw.get("intermediate_file", ""),
+        root_ca_file=cert_raw.get("root_ca_file", ""),
+    ) if cert_raw else CertificateConfig()
+
     return Config(
         timezone=str(data.get("timezone", "33")),
         ntp_server=data.get("ntp_server", "pool.ntp.org"),
@@ -158,6 +185,8 @@ def load_config() -> Config:
         discovery_timeout=int(discovery.get("timeout", 5)),
         discovery_broadcast_count=int(discovery.get("broadcast_count", 3)),
         profiles=_parse_profiles(data.get("profiles")),
+        csr_defaults=csr_defaults,
+        certificates=certificates,
     )
 
 
@@ -199,6 +228,32 @@ def save_config(config: Config) -> Path:
 
     if config.profiles:
         data["profiles"] = _serialize_profiles(config.profiles)
+
+    # CSR defaults
+    csr = config.csr_defaults
+    if any([csr.country, csr.state, csr.locality, csr.organization,
+            csr.organizational_unit, csr.email]):
+        data["csr_defaults"] = {
+            k: v for k, v in {
+                "country": csr.country,
+                "state": csr.state,
+                "locality": csr.locality,
+                "organization": csr.organization,
+                "organizational_unit": csr.organizational_unit,
+                "email": csr.email,
+            }.items() if v
+        }
+
+    # Certificate paths
+    cert = config.certificates
+    if any([cert.cert_file, cert.intermediate_file, cert.root_ca_file]):
+        data["certificates"] = {
+            k: v for k, v in {
+                "cert_file": cert.cert_file,
+                "intermediate_file": cert.intermediate_file,
+                "root_ca_file": cert.root_ca_file,
+            }.items() if v
+        }
 
     with open(path, "w") as f:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)

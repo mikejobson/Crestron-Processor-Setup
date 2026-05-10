@@ -311,6 +311,7 @@ def main() -> None:
             questionary.Choice("Batch Provision (CSV/YAML)", value="batch"),
             questionary.Choice("Upload Program", value="program"),
             questionary.Choice("Firmware Audit", value="fw_audit"),
+            questionary.Choice("Certificate Management", value="certs"),
             questionary.Choice("Restore & Erase Device", value="restore"),
             questionary.Choice("Download Firmware", value="firmware"),
             questionary.Choice("Clear Firmware Cache", value="cache"),
@@ -341,6 +342,8 @@ def main() -> None:
             _flow_restore()
         elif choice == "fw_audit":
             _flow_firmware_audit(config)
+        elif choice == "certs":
+            config = _flow_cert_management(config)
         elif choice == "firmware":
             _flow_firmware(config)
         elif choice == "cache":
@@ -383,6 +386,7 @@ def _flow_discover(config: Config) -> Config:
         choices=[
             questionary.Choice("Provision", value="provision"),
             questionary.Choice("Provision (Dry Run)", value="dry_run"),
+            questionary.Choice("Deploy Certificate", value="deploy_cert"),
             questionary.Choice("Upload Program", value="program"),
             questionary.Choice("Restore & Erase", value="restore"),
             questionary.Choice("Back to Main Menu", value="back"),
@@ -508,6 +512,12 @@ def _flow_discover(config: Config) -> Config:
             console.print("[dim]Cancelled.[/dim]")
             _pause()
             return config
+
+    # ── Deploy certificate: handled separately ──────────────────────────
+    if action == "deploy_cert":
+        _flow_bulk_deploy_cert(selected_devices, username, password, config)
+        _pause()
+        return config
 
     # Profile selection for provision actions
     profile_name: str | None = None
@@ -1517,6 +1527,570 @@ def _flow_update() -> None:
         _pause()
     else:
         _pause()
+
+
+# --------------------------------------------------------------------------- #
+#  Certificate Management flow
+# --------------------------------------------------------------------------- #
+
+
+def _flow_cert_management(config: Config) -> Config:
+    """Certificate management submenu."""
+    while True:
+        _header("Certificate Management")
+        choice = questionary.select(
+            "Certificate Management",
+            choices=[
+                questionary.Choice("View Certificate Status", value="status"),
+                questionary.Choice("Generate CSR", value="csr"),
+                questionary.Choice("Install Certificate", value="install"),
+                questionary.Choice("SSL/TLS Settings", value="tls"),
+                questionary.Choice("Back", value="back"),
+            ],
+        ).ask()
+
+        if choice is None or choice == "back":
+            return config
+        elif choice == "status":
+            _flow_cert_status(config)
+        elif choice == "csr":
+            _flow_generate_csr(config)
+        elif choice == "install":
+            _flow_install_cert(config)
+        elif choice == "tls":
+            _flow_tls_settings(config)
+
+
+def _flow_cert_status(config: Config) -> None:
+    """View SSL mode and installed certificates on a device."""
+    from .ssh import CrestronSSH
+
+    _header("Certificate Status")
+    host = questionary.text("Processor hostname or IP:").ask()
+    if not host:
+        return
+
+    creds = _prompt_credentials()
+    if not creds:
+        return
+    username, password = creds
+
+    with console.status("Reading certificate info…", spinner="dots"):
+        try:
+            with CrestronSSH(host, username, password) as ssh:
+                ssl_output = ssh.send_command("SSL", timeout=10)
+                ws_certs = ssh.send_command("CERTIFICATE LISTN WEBSERVER", timeout=10)
+                root_certs = ssh.send_command("CERTIFICATE LISTN ROOT", timeout=10)
+                inter_certs = ssh.send_command("CERTIFICATE LISTN INTERMEDIATE", timeout=10)
+        except Exception as e:
+            console.print(f"[red][FAIL][/red] Connection failed: {e}")
+            _pause()
+            return
+
+    # Display SSL mode
+    console.print()
+    console.print(Panel(
+        ssl_output.strip() or "[dim]No SSL info returned[/dim]",
+        title=f"SSL Status — {host}",
+        border_style="cyan",
+        padding=(1, 2),
+    ))
+
+    # Display webserver certs
+    _cert_table("Webserver Certificates", ws_certs)
+    _cert_table("Intermediate CA Certificates", inter_certs)
+    _cert_table("Root CA Certificates", root_certs)
+
+    _pause()
+
+
+def _cert_table(title: str, raw_output: str) -> None:
+    """Display certificate list output in a panel."""
+    content = raw_output.strip()
+    if not content or "no certificates" in content.lower() or content.startswith("Error"):
+        console.print(f"\n[dim]{title}: None installed[/dim]")
+        return
+    console.print()
+    console.print(Panel(
+        content,
+        title=title,
+        border_style="cyan",
+        padding=(1, 2),
+    ))
+
+
+def _flow_generate_csr(config: Config) -> None:
+    """Generate a Certificate Signing Request on a device."""
+    from pathlib import Path
+
+    from .ssh import CrestronSSH, sftp_download
+
+    _header("Generate CSR")
+    host = questionary.text("Processor hostname or IP:").ask()
+    if not host:
+        return
+
+    creds = _prompt_credentials()
+    if not creds:
+        return
+    username, password = creds
+
+    # Prompt for CSR fields with defaults from config
+    csr = config.csr_defaults
+    console.print("[dim]Fill in CSR details (press Enter to use default).[/dim]\n")
+
+    country = questionary.text("Country (2-letter code):", default=csr.country).ask()
+    if country is None:
+        return
+    state = questionary.text("State/Province:", default=csr.state).ask()
+    if state is None:
+        return
+    locality = questionary.text("Locality/City:", default=csr.locality).ask()
+    if locality is None:
+        return
+    org = questionary.text("Organization:", default=csr.organization).ask()
+    if org is None:
+        return
+    ou = questionary.text("Organizational Unit:", default=csr.organizational_unit).ask()
+    if ou is None:
+        return
+    cn = questionary.text("Common Name (hostname/domain):", default=host).ask()
+    if cn is None:
+        return
+    email = questionary.text("Email:", default=csr.email).ask()
+    if email is None:
+        return
+
+    # Subject Alternative Names
+    san_input = questionary.text(
+        "Subject Alt Names (comma-separated DNS names, or blank):",
+        default=f"DNS:{cn}" if cn else "",
+    ).ask()
+    if san_input is None:
+        return
+
+    # Build SANs list
+    sans: list[str] = []
+    if san_input.strip():
+        for s in san_input.split(","):
+            s = s.strip()
+            if s and not s.upper().startswith("DNS:"):
+                s = f"DNS:{s}"
+            if s:
+                sans.append(s)
+
+    # Build CREATECSR command
+    # Format: CREATECSR C:ST:L:O:OU:CN:E [-I:true] [-S:altname,altname,...]
+    parts = [
+        country.strip() or " ",
+        state.strip() or " ",
+        locality.strip() or " ",
+        org.strip() or " ",
+        ou.strip() or " ",
+        cn.strip() or " ",
+        email.strip() or " ",
+    ]
+    # Quote values with spaces
+    quoted = []
+    for p in parts:
+        if " " in p.strip():
+            quoted.append(f'"{p}"')
+        else:
+            quoted.append(p)
+
+    cmd = f"CREATECSR {':'.join(quoted)} -I:true"
+    if sans:
+        san_str = ",".join(sans)
+        cmd += f" -S:{san_str}"
+
+    console.print(f"\n[cyan]Command:[/cyan] {cmd}\n")
+
+    confirm = questionary.confirm("Send this CSR command to the device?").ask()
+    if not confirm:
+        return
+
+    # Execute on device
+    try:
+        with CrestronSSH(host, username, password) as ssh:
+            with console.status("Generating CSR on device…", spinner="dots"):
+                output = ssh.send_command(cmd, timeout=30)
+            console.print(output.strip())
+    except Exception as e:
+        console.print(f"[red][FAIL][/red] Failed: {e}")
+        _pause()
+        return
+
+    # Offer to download the CSR file
+    console.print()
+    download = questionary.confirm(
+        "Download the CSR file from the device?"
+    ).ask()
+    if download:
+        save_dir = questionary.path(
+            "Save CSR to directory:",
+            default=str(Path.home() / "Downloads"),
+            only_directories=True,
+        ).ask()
+        if save_dir:
+            # CSR is typically saved to /user/ on the device
+            result = sftp_download(
+                host, username, password,
+                "/user/csr.pem", save_dir, console=console,
+            )
+            if result:
+                console.print(f"[green][OK][/green] CSR saved: {result}")
+
+    _pause()
+
+
+def _flow_install_cert(config: Config) -> None:
+    """Upload and install certificates on a device."""
+    from pathlib import Path
+
+    from .ssh import CrestronSSH, sftp_upload
+
+    _header("Install Certificate")
+    host = questionary.text("Processor hostname or IP:").ask()
+    if not host:
+        return
+
+    creds = _prompt_credentials()
+    if not creds:
+        return
+    username, password = creds
+
+    # Certificate file
+    cert_default = config.certificates.cert_file
+    cert_path = questionary.path(
+        "Certificate file (.pem, .cer, .crt, .pfx, .p12):",
+        default=cert_default,
+    ).ask()
+    if not cert_path:
+        return
+
+    cert_file = Path(cert_path).expanduser()
+    if not cert_file.is_file():
+        console.print(f"[red][FAIL][/red] File not found: {cert_file}")
+        _pause()
+        return
+
+    cert_ext = cert_file.suffix.lower()
+    needs_password = cert_ext in (".pfx", ".p12")
+
+    key_password = ""
+    if needs_password:
+        key_password = questionary.password(
+            "Private key password (for PFX/P12):"
+        ).ask() or ""
+
+    # Optional intermediate cert
+    inter_default = config.certificates.intermediate_file
+    inter_path = questionary.path(
+        "Intermediate CA cert (blank to skip):",
+        default=inter_default,
+    ).ask()
+
+    # Optional root CA cert
+    root_default = config.certificates.root_ca_file
+    root_path = questionary.path(
+        "Root CA cert (blank to skip):",
+        default=root_default,
+    ).ask()
+
+    console.print()
+    console.print("[bold]Installation plan:[/bold]")
+    console.print(f"  Certificate:   {cert_file.name} → WEBSERVER store")
+    if inter_path and Path(inter_path).expanduser().is_file():
+        console.print(f"  Intermediate:  {Path(inter_path).name} → INTERMEDIATE store")
+    if root_path and Path(root_path).expanduser().is_file():
+        console.print(f"  Root CA:       {Path(root_path).name} → ROOT store")
+    console.print(f"  SSL mode:      CA (activate CA-signed)")
+    console.print()
+
+    confirm = questionary.confirm("Proceed with installation?").ask()
+    if not confirm:
+        return
+
+    try:
+        # Upload cert file
+        console.print("\n[cyan]Uploading certificate file…[/cyan]")
+        if not sftp_upload(host, username, password, str(cert_file), "/user", console):
+            _pause()
+            return
+
+        # Upload intermediate cert if provided
+        if inter_path:
+            inter_file = Path(inter_path).expanduser()
+            if inter_file.is_file():
+                console.print("\n[cyan]Uploading intermediate CA…[/cyan]")
+                sftp_upload(host, username, password, str(inter_file), "/user", console)
+
+        # Upload root CA if provided
+        if root_path:
+            root_file = Path(root_path).expanduser()
+            if root_file.is_file():
+                console.print("\n[cyan]Uploading root CA…[/cyan]")
+                sftp_upload(host, username, password, str(root_file), "/user", console)
+
+        # Install via SSH commands
+        with CrestronSSH(host, username, password) as ssh:
+            # Install root CA first (if provided)
+            if root_path:
+                root_file = Path(root_path).expanduser()
+                if root_file.is_file():
+                    console.print(f"\n[cyan]Installing root CA into ROOT store…[/cyan]")
+                    out = ssh.send_command(
+                        f"CERTIFICATE ADDF {root_file.name} ROOT", timeout=30
+                    )
+                    console.print(f"  {out.strip()}")
+
+            # Install intermediate (if provided)
+            if inter_path:
+                inter_file = Path(inter_path).expanduser()
+                if inter_file.is_file():
+                    console.print(f"\n[cyan]Installing intermediate into INTERMEDIATE store…[/cyan]")
+                    out = ssh.send_command(
+                        f"CERTIFICATE ADDF {inter_file.name} INTERMEDIATE", timeout=30
+                    )
+                    console.print(f"  {out.strip()}")
+
+            # Install webserver cert
+            console.print(f"\n[cyan]Installing certificate into WEBSERVER store…[/cyan]")
+            addf_cmd = f"CERTIFICATE ADDF {cert_file.name} WEBSERVER"
+            if needs_password and key_password:
+                addf_cmd += f" {key_password}"
+            out = ssh.send_command(addf_cmd, timeout=30)
+            console.print(f"  {out.strip()}")
+
+            # Activate CA-signed SSL
+            console.print("\n[cyan]Activating CA-signed SSL…[/cyan]")
+            ssl_cmd = "SSL CA"
+            if needs_password and key_password:
+                ssl_cmd += f" -P:{key_password}"
+            out = ssh.send_command(ssl_cmd, timeout=30)
+            console.print(f"  {out.strip()}")
+
+            console.print("\n[green][OK][/green] Certificate installation complete.")
+
+    except Exception as e:
+        console.print(f"\n[red][FAIL][/red] Installation failed: {e}")
+
+    _pause()
+
+
+def _flow_tls_settings(config: Config) -> None:
+    """View and configure SSL/TLS settings on a device."""
+    from .ssh import CrestronSSH
+
+    _header("SSL/TLS Settings")
+    host = questionary.text("Processor hostname or IP:").ask()
+    if not host:
+        return
+
+    creds = _prompt_credentials()
+    if not creds:
+        return
+    username, password = creds
+
+    try:
+        with CrestronSSH(host, username, password) as ssh:
+            # Read current settings
+            with console.status("Reading TLS settings…", spinner="dots"):
+                ssl_out = ssh.send_command("SSL", timeout=10)
+                tls_ver = ssh.send_command("TLSVERSION", timeout=10)
+                ssl_verify = ssh.send_command("SSLVERIFY", timeout=10)
+                self_reboot = ssh.send_command("CERTIFICATE SELFEXPIREREBOOT", timeout=10)
+
+            table = Table(title=f"SSL/TLS Settings — {host}", border_style="cyan")
+            table.add_column("Setting", style="cyan", min_width=25)
+            table.add_column("Current Value", min_width=40)
+
+            table.add_row("SSL Mode", ssl_out.strip())
+            table.add_row("TLS Version", tls_ver.strip())
+            table.add_row("SSL Verify", ssl_verify.strip())
+            table.add_row("Self-Signed Reboot", self_reboot.strip())
+
+            console.print(table)
+            console.print()
+
+            # Offer to change settings
+            action = questionary.select(
+                "Configure a setting:",
+                choices=[
+                    questionary.Choice("Set TLS Version", value="tlsver"),
+                    questionary.Choice("Set SSL Verify", value="sslverify"),
+                    questionary.Choice("Self-Signed Cert Reboot", value="selfreboot"),
+                    questionary.Choice("Back", value="back"),
+                ],
+            ).ask()
+
+            if action == "tlsver":
+                ver = questionary.select(
+                    "Minimum TLS version:",
+                    choices=[
+                        questionary.Choice("TLS 1.2 + 1.3 (Both)", value="BOTH"),
+                        questionary.Choice("TLS 1.2 only", value="TLS1.2"),
+                        questionary.Choice("TLS 1.3 only", value="TLS1.3"),
+                    ],
+                ).ask()
+                if ver:
+                    out = ssh.send_command(f"TLSVERSION {ver}", timeout=10)
+                    console.print(f"  {out.strip()}")
+
+            elif action == "sslverify":
+                mode = questionary.select(
+                    "SSL verification mode:",
+                    choices=[
+                        questionary.Choice("All checks enabled", value="ALL"),
+                        questionary.Choice("Trust check only", value="-T:ON"),
+                        questionary.Choice("Off (allow self-signed)", value="-T:OFF"),
+                    ],
+                ).ask()
+                if mode:
+                    out = ssh.send_command(f"SSLVERIFY {mode}", timeout=10)
+                    console.print(f"  {out.strip()}")
+
+            elif action == "selfreboot":
+                mode = questionary.select(
+                    "Auto-reboot on self-signed cert expiry:",
+                    choices=[
+                        questionary.Choice("Enable", value="ENABLE"),
+                        questionary.Choice("Disable", value="DISABLE"),
+                    ],
+                ).ask()
+                if mode:
+                    out = ssh.send_command(
+                        f"CERTIFICATE SELFEXPIREREBOOT {mode}", timeout=10
+                    )
+                    console.print(f"  {out.strip()}")
+
+    except Exception as e:
+        console.print(f"[red][FAIL][/red] Connection failed: {e}")
+
+    _pause()
+
+
+def _flow_bulk_deploy_cert(
+    devices: list[Device],
+    username: str,
+    password: str,
+    config: Config,
+) -> None:
+    """Deploy a certificate to multiple devices in parallel."""
+    from pathlib import Path
+
+    from .ssh import CrestronSSH, sftp_upload
+
+    _header("Deploy Certificate to Devices")
+
+    console.print(f"[cyan]{len(devices)}[/cyan] device(s) selected.\n")
+
+    # Certificate file
+    cert_default = config.certificates.cert_file
+    cert_path = questionary.path(
+        "Certificate file (.pem, .cer, .crt, .pfx, .p12):",
+        default=cert_default,
+    ).ask()
+    if not cert_path:
+        return
+
+    cert_file = Path(cert_path).expanduser()
+    if not cert_file.is_file():
+        console.print(f"[red][FAIL][/red] File not found: {cert_file}")
+        return
+
+    cert_ext = cert_file.suffix.lower()
+    needs_password = cert_ext in (".pfx", ".p12")
+
+    key_password = ""
+    if needs_password:
+        key_password = questionary.password(
+            "Private key password (for PFX/P12):"
+        ).ask() or ""
+
+    # Optional intermediate/root
+    inter_path = questionary.path(
+        "Intermediate CA cert (blank to skip):",
+        default=config.certificates.intermediate_file,
+    ).ask()
+
+    root_path = questionary.path(
+        "Root CA cert (blank to skip):",
+        default=config.certificates.root_ca_file,
+    ).ask()
+
+    confirm = questionary.confirm(
+        f"Deploy certificate to {len(devices)} device(s)?"
+    ).ask()
+    if not confirm:
+        return
+
+    # Deploy to each device
+    results: list[tuple[str, bool, str]] = []
+
+    def _deploy_one(dev: Device) -> tuple[str, bool, str]:
+        host = dev.ip or dev.hostname
+        try:
+            # Upload files
+            if not sftp_upload(host, username, password, str(cert_file), "/user"):
+                return host, False, "SFTP upload failed"
+
+            if inter_path:
+                inter = Path(inter_path).expanduser()
+                if inter.is_file():
+                    sftp_upload(host, username, password, str(inter), "/user")
+
+            if root_path:
+                root = Path(root_path).expanduser()
+                if root.is_file():
+                    sftp_upload(host, username, password, str(root), "/user")
+
+            # Install via SSH
+            with CrestronSSH(host, username, password) as ssh:
+                if root_path:
+                    root = Path(root_path).expanduser()
+                    if root.is_file():
+                        ssh.send_command(
+                            f"CERTIFICATE ADDF {root.name} ROOT", timeout=30
+                        )
+
+                if inter_path:
+                    inter = Path(inter_path).expanduser()
+                    if inter.is_file():
+                        ssh.send_command(
+                            f"CERTIFICATE ADDF {inter.name} INTERMEDIATE", timeout=30
+                        )
+
+                addf_cmd = f"CERTIFICATE ADDF {cert_file.name} WEBSERVER"
+                if needs_password and key_password:
+                    addf_cmd += f" {key_password}"
+                ssh.send_command(addf_cmd, timeout=30)
+
+                ssl_cmd = "SSL CA"
+                if needs_password and key_password:
+                    ssl_cmd += f" -P:{key_password}"
+                ssh.send_command(ssl_cmd, timeout=30)
+
+            return host, True, "OK"
+        except Exception as e:
+            return host, False, str(e)[:60]
+
+    with console.status("Deploying certificates…", spinner="dots"):
+        with ThreadPoolExecutor(max_workers=len(devices)) as pool:
+            futures = [pool.submit(_deploy_one, dev) for dev in devices]
+            results = [f.result() for f in futures]
+
+    # Show results
+    table = Table(title="Certificate Deployment Results", border_style="cyan")
+    table.add_column("Device", style="cyan", min_width=18)
+    table.add_column("Result", min_width=10)
+    table.add_column("Detail", min_width=30)
+
+    for host, success, detail in results:
+        status = "[green]✓ OK[/green]" if success else "[red]✗ Failed[/red]"
+        table.add_row(host, status, detail)
+
+    console.print(table)
 
 
 # --------------------------------------------------------------------------- #
