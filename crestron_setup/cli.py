@@ -2451,73 +2451,68 @@ def _flow_ip_table(config: Config, host: str | None = None,
 # --------------------------------------------------------------------------- #
 
 
-def _parse_line_tokens(raw: str) -> list[str]:
-    """Extract meaningful tokens from Crestron list output.
-
-    Handles common Crestron output patterns — skips blank lines, header
-    labels, and separator/decoration lines. Returns the first whitespace-
-    delimited token from each remaining line.
-    """
-    tokens: list[str] = []
-    for line in raw.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        # Skip separators and decorations
-        if all(c in "-=+|*" for c in stripped):
-            continue
-        # Skip lines that look like headers/labels (contain a colon at end)
-        if stripped.endswith(":") and len(stripped.split()) <= 4:
-            continue
-        # Take the first token (username / group name)
-        token = stripped.split()[0]
-        # Skip if it looks like a Crestron info line, not a data value
-        if token.upper() in ("NO", "NONE", "ERROR", "ERROR:", "TIMEOUT"):
-            continue
-        tokens.append(token)
-    return tokens
-
-
-def _get_user_groups(ssh: "CrestronSSH") -> dict[str, list[str]]:
-    """Query LISTGROUPUSERS for each standard access level group.
-
-    Returns a mapping of username → list of group names.
-    """
-    user_groups: dict[str, list[str]] = {}
-    for group in ACCESS_LEVELS:
-        try:
-            members_raw = ssh.send_command(f"LISTGROUPUSERS {group}", timeout=10)
-        except Exception:
-            continue
-        for name in _parse_line_tokens(members_raw):
-            user_groups.setdefault(name, []).append(group)
-
-    return user_groups
-
-
 # Standard Crestron access level groups
 ACCESS_LEVELS = ["Administrator", "Programmer", "Operator", "User", "Connect"]
 
 
-def _list_users_from_device(ssh: "CrestronSSH") -> tuple[list[str], dict[str, list[str]]]:
-    """Get the combined user list and group mappings from the device.
+@dataclass
+class _UserInfo:
+    """Parsed row from LISTUSERS pipe-delimited table."""
+    username: str
+    access_level: str
+    groups: str
 
-    Uses both LISTUSERS and LISTGROUPUSERS to build a complete picture —
-    some users may not be in any group, others may only appear in groups.
+
+def _parse_listusers(raw: str) -> list[_UserInfo]:
+    """Parse LISTUSERS pipe-delimited table output.
+
+    Expected format:
+        TableStart: [ User List ]
+        User                 | Access Level         | Groups
+        ---------------------+----------------------+---------------------
+        admin                | Administrator        | Administrators
+        mike                 | None                 |
     """
-    raw = ssh.send_command("LISTUSERS", timeout=15)
-    users_from_list = _parse_line_tokens(raw)
-    user_groups = _get_user_groups(ssh)
+    users: list[_UserInfo] = []
+    in_data = False
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Separator line marks the start of data rows
+        if stripped.startswith("---") and "+" in stripped:
+            in_data = True
+            continue
+        if not in_data:
+            continue
+        if "|" not in stripped:
+            continue
+        parts = [p.strip() for p in stripped.split("|")]
+        if len(parts) < 2:
+            continue
+        username = parts[0]
+        if not username:
+            continue
+        access_level = parts[1] if len(parts) > 1 else ""
+        groups = parts[2] if len(parts) > 2 else ""
+        users.append(_UserInfo(
+            username=username,
+            access_level=access_level if access_level.lower() != "none" else "",
+            groups=groups,
+        ))
+    return users
 
-    # Merge: users from LISTUSERS + any users found only in groups
-    all_users = set(users_from_list) | set(user_groups.keys())
-    return sorted(all_users), user_groups
+
+def _list_users_from_device(ssh: "CrestronSSH") -> list[_UserInfo]:
+    """Get the user list from the device via LISTUSERS."""
+    raw = ssh.send_command("LISTUSERS", timeout=15)
+    return _parse_listusers(raw)
 
 
 def _account_list_users(ssh: "CrestronSSH") -> None:
-    """List all users with their group memberships."""
+    """List all users with their access levels and group memberships."""
     with console.status("Reading users…", spinner="dots"):
-        users, user_groups = _list_users_from_device(ssh)
+        users = _list_users_from_device(ssh)
 
     if not users:
         console.print("\n[dim]No users found.[/dim]\n")
@@ -2529,25 +2524,18 @@ def _account_list_users(ssh: "CrestronSSH") -> None:
     table.add_column("Groups")
 
     for user in users:
-        groups = user_groups.get(user, [])
-        # Determine highest access level
-        level = ""
-        for lvl in ACCESS_LEVELS:
-            if lvl in groups:
-                level = lvl
-                break
         level_style = {
             "Administrator": "[bold red]Administrator[/bold red]",
             "Programmer": "[bold yellow]Programmer[/bold yellow]",
             "Operator": "[cyan]Operator[/cyan]",
             "User": "[dim]User[/dim]",
             "Connect": "[dim]Connect[/dim]",
-        }.get(level, "[dim]—[/dim]")
+        }.get(user.access_level, "[dim]—[/dim]")
 
         table.add_row(
-            user,
+            user.username,
             level_style,
-            ", ".join(groups) if groups else "[dim]—[/dim]",
+            user.groups if user.groups else "[dim]—[/dim]",
         )
 
     console.print()
@@ -2601,12 +2589,12 @@ def _account_create_user(ssh: "CrestronSSH") -> None:
 def _account_delete_user(ssh: "CrestronSSH") -> None:
     """Delete a user account."""
     with console.status("Reading users…", spinner="dots"):
-        users, _ = _list_users_from_device(ssh)
+        users = _list_users_from_device(ssh)
     if not users:
         console.print("[dim]No users found.[/dim]")
         return
 
-    choices = [questionary.Choice(u, value=u) for u in users]
+    choices = [questionary.Choice(u.username, value=u.username) for u in users]
     username = questionary.select("Select user to delete:", choices=choices).ask()
     if not username:
         return
@@ -2627,7 +2615,7 @@ def _account_delete_user(ssh: "CrestronSSH") -> None:
 def _account_change_level(ssh: "CrestronSSH") -> None:
     """Change a user's access level (group membership)."""
     with console.status("Reading users…", spinner="dots"):
-        users, user_groups = _list_users_from_device(ssh)
+        users = _list_users_from_device(ssh)
 
     if not users:
         console.print("[dim]No users found.[/dim]")
@@ -2636,56 +2624,56 @@ def _account_change_level(ssh: "CrestronSSH") -> None:
     # Show current levels in the selection
     choices = []
     for u in users:
-        groups = user_groups.get(u, [])
-        current = next((g for g in ACCESS_LEVELS if g in groups), "None")
-        choices.append(questionary.Choice(f"{u}  ({current})", value=u))
+        current = u.access_level or "None"
+        choices.append(questionary.Choice(f"{u.username}  ({current})", value=u))
 
-    username = questionary.select("Select user:", choices=choices).ask()
-    if not username:
+    selected = questionary.select("Select user:", choices=choices).ask()
+    if not selected:
         return
 
-    current_groups = user_groups.get(username, [])
-    current_level = next((g for g in ACCESS_LEVELS if g in current_groups), None)
+    current_level = selected.access_level
+    # Parse current groups into a list for removal
+    current_group_list = [g.strip() for g in selected.groups.split(",") if g.strip()] if selected.groups else []
 
     new_level = questionary.select(
-        f"New access level for '{username}':",
+        f"New access level for '{selected.username}':",
         choices=[questionary.Choice(lvl, value=lvl) for lvl in ACCESS_LEVELS],
     ).ask()
     if not new_level:
         return
 
     if new_level == current_level:
-        console.print(f"[dim]Already in '{new_level}' — no change.[/dim]")
+        console.print(f"[dim]Already '{new_level}' — no change.[/dim]")
         return
 
     # Remove from current access-level groups
-    for group in current_groups:
-        if group in ACCESS_LEVELS:
+    for group in current_group_list:
+        if group in ACCESS_LEVELS or any(group.rstrip("s") == lvl.rstrip("s") for lvl in ACCESS_LEVELS):
             resp = ssh.send_command(
-                f"REMOVEUSERFROMGROUP -N:{username} -G:{group}", timeout=10,
+                f"REMOVEUSERFROMGROUP -N:{selected.username} -G:{group}", timeout=10,
             )
             if "error" in resp.lower():
                 console.print(f"[yellow][WARN][/yellow] Remove from {group}: {resp.strip()}")
 
     # Add to new group
     resp = ssh.send_command(
-        f"ADDUSERTOGROUP -N:{username} -G:{new_level}", timeout=10,
+        f"ADDUSERTOGROUP -N:{selected.username} -G:{new_level}", timeout=10,
     )
     if "error" in resp.lower():
         console.print(f"[red][FAIL][/red] {resp.strip()}")
     else:
-        console.print(f"[green][OK][/green] '{username}' is now {new_level}.")
+        console.print(f"[green][OK][/green] '{selected.username}' is now {new_level}.")
 
 
 def _account_reset_password(ssh: "CrestronSSH") -> None:
     """Reset a user's password."""
     with console.status("Reading users…", spinner="dots"):
-        users, _ = _list_users_from_device(ssh)
+        users = _list_users_from_device(ssh)
     if not users:
         console.print("[dim]No users found.[/dim]")
         return
 
-    choices = [questionary.Choice(u, value=u) for u in users]
+    choices = [questionary.Choice(u.username, value=u.username) for u in users]
     username = questionary.select("Select user:", choices=choices).ask()
     if not username:
         return
@@ -2714,12 +2702,12 @@ def _account_manage_pubkey(ssh: "CrestronSSH", config: Config,
     from .ssh import sftp_upload
 
     with console.status("Reading users…", spinner="dots"):
-        users, _ = _list_users_from_device(ssh)
+        users = _list_users_from_device(ssh)
     if not users:
         console.print("[dim]No users found.[/dim]")
         return
 
-    choices = [questionary.Choice(u, value=u) for u in users]
+    choices = [questionary.Choice(u.username, value=u.username) for u in users]
     username = questionary.select("Add SSH key for which user?", choices=choices).ask()
     if not username:
         return
@@ -2774,15 +2762,47 @@ def _account_manage_pubkey(ssh: "CrestronSSH", config: Config,
 def _account_locked_users(ssh: "CrestronSSH") -> None:
     """Display locked-out user accounts."""
     raw = ssh.send_command("LISTLOCKEDUSERS", timeout=10)
-    tokens = _parse_line_tokens(raw)
 
-    if not tokens:
+    # Extract usernames — handle both pipe-delimited tables and simple lists
+    names: list[str] = []
+    in_data = False
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Check for pipe-delimited table format
+        if stripped.startswith("---") and ("+" in stripped or "-" in stripped):
+            in_data = True
+            continue
+        if in_data and "|" in stripped:
+            name = stripped.split("|")[0].strip()
+            if name:
+                names.append(name)
+            continue
+        if in_data and stripped:
+            token = stripped.split()[0]
+            if token:
+                names.append(token)
+            continue
+        # Simple list format — skip headers and decorations
+        if not in_data and "|" not in stripped:
+            if stripped.startswith("-") or stripped.startswith("="):
+                continue
+            if stripped.upper().startswith("TABLESTART") or stripped.endswith(":"):
+                continue
+            if "no" in stripped.lower() and "locked" in stripped.lower():
+                break
+            token = stripped.split()[0]
+            if token and token.upper() not in ("NO", "NONE", "ERROR"):
+                names.append(token)
+
+    if not names:
         console.print("\n[green][OK][/green] No locked-out users.\n")
         return
 
     table = Table(title="Locked Users", border_style="yellow")
     table.add_column("Username", style="bold red")
-    for name in tokens:
+    for name in names:
         table.add_row(name)
 
     console.print()
