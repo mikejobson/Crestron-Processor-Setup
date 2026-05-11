@@ -314,6 +314,7 @@ def main() -> None:
             questionary.Choice("Firmware Audit", value="fw_audit"),
             questionary.Choice("Certificate Management", value="certs"),
             questionary.Choice("IP Table Management", value="iptable"),
+            questionary.Choice("Account Management", value="accounts"),
             questionary.Choice("Restore & Erase Device", value="restore"),
             questionary.Choice("Download Firmware", value="firmware"),
             questionary.Choice("Clear Firmware Cache", value="cache"),
@@ -348,6 +349,8 @@ def main() -> None:
             config = _flow_cert_management(config)
         elif choice == "iptable":
             config = _flow_ip_table(config)
+        elif choice == "accounts":
+            config = _flow_account_mgmt(config)
         elif choice == "firmware":
             _flow_firmware(config)
         elif choice == "cache":
@@ -392,6 +395,7 @@ def _flow_discover(config: Config) -> Config:
             questionary.Choice("Provision (Dry Run)", value="dry_run"),
             questionary.Choice("Deploy Certificate", value="deploy_cert"),
             questionary.Choice("IP Table", value="iptable"),
+            questionary.Choice("Account Management", value="accounts"),
             questionary.Choice("Upload Program", value="program"),
             questionary.Choice("Restore & Erase", value="restore"),
             questionary.Choice("Back to Main Menu", value="back"),
@@ -411,7 +415,7 @@ def _flow_discover(config: Config) -> Config:
         for i, dev in enumerate(devices)
     ]
 
-    if action == "iptable":
+    if action in ("iptable", "accounts"):
         selected_idx = questionary.select(
             "Select device:",
             choices=device_choices,
@@ -599,6 +603,10 @@ def _flow_discover(config: Config) -> Config:
         elif action == "iptable":
             _flow_ip_table(config, host=dev.ip or dev.hostname,
                            username=username, password=password)
+            return config
+        elif action == "accounts":
+            _flow_account_mgmt(config, host=dev.ip or dev.hostname,
+                               username=username, password=password)
             return config
         _pause()
         return config
@@ -2425,6 +2433,361 @@ def _flow_ip_table(config: Config, host: str | None = None,
                     _ip_table_remove_peer(ssh)
                 elif choice == "clear":
                     _ip_table_clear(ssh)
+            except Exception as e:
+                console.print(f"[red][FAIL][/red] {e}")
+
+            _pause()
+    finally:
+        try:
+            ssh.disconnect()
+        except Exception:
+            pass
+
+    return config
+
+
+# --------------------------------------------------------------------------- #
+#  Account Management flow
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class _UserEntry:
+    """Parsed user from LISTUSERS output."""
+    username: str
+    groups: list[str]
+
+
+def _parse_listusers(raw: str) -> list[str]:
+    """Parse LISTUSERS output into a list of usernames."""
+    users: list[str] = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.upper().startswith("LISTUSERS"):
+            continue
+        # Skip header/separator lines
+        if stripped.startswith("-") or stripped.startswith("="):
+            continue
+        # Each non-empty line that looks like a username
+        if stripped and not stripped.startswith("*") and " " not in stripped:
+            users.append(stripped)
+    return users
+
+
+def _get_user_groups(ssh: "CrestronSSH") -> dict[str, list[str]]:
+    """Query LISTGROUPS and LISTGROUPUSERS to map users to their groups."""
+    raw = ssh.send_command("LISTGROUPS", timeout=15)
+    groups: list[str] = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.upper().startswith("LISTGROUPS"):
+            continue
+        if stripped.startswith("-") or stripped.startswith("="):
+            continue
+        # Group names are single words/tokens per line
+        name = stripped.split()[0] if stripped.split() else ""
+        if name and not name.startswith("*"):
+            groups.append(name)
+
+    user_groups: dict[str, list[str]] = {}
+    for group in groups:
+        members_raw = ssh.send_command(f"LISTGROUPUSERS {group}", timeout=10)
+        for line in members_raw.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.upper().startswith("LISTGROUPUSERS"):
+                continue
+            if stripped.startswith("-") or stripped.startswith("="):
+                continue
+            name = stripped.split()[0] if stripped.split() else ""
+            if name and not name.startswith("*"):
+                user_groups.setdefault(name, []).append(group)
+
+    return user_groups
+
+
+# Standard Crestron access level groups
+ACCESS_LEVELS = ["Administrator", "Programmer", "Operator", "User", "Connect"]
+
+
+def _account_list_users(ssh: "CrestronSSH") -> None:
+    """List all users with their group memberships."""
+    with console.status("Reading users…", spinner="dots"):
+        users = _parse_listusers(ssh.send_command("LISTUSERS", timeout=15))
+        user_groups = _get_user_groups(ssh)
+
+    if not users:
+        console.print("\n[dim]No users found.[/dim]\n")
+        return
+
+    table = Table(title="User Accounts", border_style="cyan", show_lines=False)
+    table.add_column("Username", style="bold")
+    table.add_column("Access Level")
+    table.add_column("Groups")
+
+    for user in sorted(users):
+        groups = user_groups.get(user, [])
+        # Determine highest access level
+        level = ""
+        for lvl in ACCESS_LEVELS:
+            if lvl in groups:
+                level = lvl
+                break
+        level_style = {
+            "Administrator": "[bold red]Administrator[/bold red]",
+            "Programmer": "[bold yellow]Programmer[/bold yellow]",
+            "Operator": "[cyan]Operator[/cyan]",
+            "User": "[dim]User[/dim]",
+            "Connect": "[dim]Connect[/dim]",
+        }.get(level, "[dim]—[/dim]")
+
+        table.add_row(
+            user,
+            level_style,
+            ", ".join(groups) if groups else "[dim]—[/dim]",
+        )
+
+    console.print()
+    console.print(table)
+    console.print(f"[dim]  {len(users)} user(s)[/dim]\n")
+
+
+def _account_create_user(ssh: "CrestronSSH") -> None:
+    """Create a new user account."""
+    username = questionary.text("Username:").ask()
+    if not username:
+        return
+
+    password = questionary.password("Password:").ask()
+    if not password:
+        return
+    confirm_pw = questionary.password("Confirm password:").ask()
+    if password != confirm_pw:
+        console.print("[red][FAIL][/red] Passwords do not match.")
+        return
+
+    resp = ssh.send_command(f"ADDUSER -N:{username} -P:{password}", timeout=10)
+    if "error" in resp.lower():
+        console.print(f"[red][FAIL][/red] {resp.strip()}")
+        return
+    console.print(f"[green][OK][/green] User '{username}' created.")
+
+    # Offer to set access level
+    level = questionary.select(
+        "Access level:",
+        choices=[
+            questionary.Choice("Administrator", value="Administrator"),
+            questionary.Choice("Programmer", value="Programmer"),
+            questionary.Choice("Operator", value="Operator"),
+            questionary.Choice("User", value="User"),
+            questionary.Choice("Connect", value="Connect"),
+            questionary.Choice("Skip (no group assignment)", value=None),
+        ],
+    ).ask()
+
+    if level:
+        resp = ssh.send_command(
+            f"ADDUSERTOGROUP -N:{username} -G:{level}", timeout=10,
+        )
+        if "error" in resp.lower():
+            console.print(f"[yellow][WARN][/yellow] Group assignment: {resp.strip()}")
+        else:
+            console.print(f"[green][OK][/green] Added to '{level}' group.")
+
+
+def _account_delete_user(ssh: "CrestronSSH") -> None:
+    """Delete a user account."""
+    users = _parse_listusers(ssh.send_command("LISTUSERS", timeout=15))
+    if not users:
+        console.print("[dim]No users found.[/dim]")
+        return
+
+    choices = [questionary.Choice(u, value=u) for u in sorted(users)]
+    username = questionary.select("Select user to delete:", choices=choices).ask()
+    if not username:
+        return
+
+    confirm = questionary.confirm(
+        f"Delete user '{username}'? This cannot be undone.", default=False,
+    ).ask()
+    if not confirm:
+        return
+
+    resp = ssh.send_command(f"DELETEUSER {username} /Y", timeout=10)
+    if "error" in resp.lower():
+        console.print(f"[red][FAIL][/red] {resp.strip()}")
+    else:
+        console.print(f"[green][OK][/green] User '{username}' deleted.")
+
+
+def _account_change_level(ssh: "CrestronSSH") -> None:
+    """Change a user's access level (group membership)."""
+    with console.status("Reading users…", spinner="dots"):
+        users = _parse_listusers(ssh.send_command("LISTUSERS", timeout=15))
+        user_groups = _get_user_groups(ssh)
+
+    if not users:
+        console.print("[dim]No users found.[/dim]")
+        return
+
+    # Show current levels in the selection
+    choices = []
+    for u in sorted(users):
+        groups = user_groups.get(u, [])
+        current = next((g for g in ACCESS_LEVELS if g in groups), "None")
+        choices.append(questionary.Choice(f"{u}  ({current})", value=u))
+
+    username = questionary.select("Select user:", choices=choices).ask()
+    if not username:
+        return
+
+    current_groups = user_groups.get(username, [])
+    current_level = next((g for g in ACCESS_LEVELS if g in current_groups), None)
+
+    new_level = questionary.select(
+        f"New access level for '{username}':",
+        choices=[questionary.Choice(lvl, value=lvl) for lvl in ACCESS_LEVELS],
+    ).ask()
+    if not new_level:
+        return
+
+    if new_level == current_level:
+        console.print(f"[dim]Already in '{new_level}' — no change.[/dim]")
+        return
+
+    # Remove from current access-level groups
+    for group in current_groups:
+        if group in ACCESS_LEVELS:
+            resp = ssh.send_command(
+                f"REMOVEUSERFROMGROUP -N:{username} -G:{group}", timeout=10,
+            )
+            if "error" in resp.lower():
+                console.print(f"[yellow][WARN][/yellow] Remove from {group}: {resp.strip()}")
+
+    # Add to new group
+    resp = ssh.send_command(
+        f"ADDUSERTOGROUP -N:{username} -G:{new_level}", timeout=10,
+    )
+    if "error" in resp.lower():
+        console.print(f"[red][FAIL][/red] {resp.strip()}")
+    else:
+        console.print(f"[green][OK][/green] '{username}' is now {new_level}.")
+
+
+def _account_reset_password(ssh: "CrestronSSH") -> None:
+    """Reset a user's password."""
+    users = _parse_listusers(ssh.send_command("LISTUSERS", timeout=15))
+    if not users:
+        console.print("[dim]No users found.[/dim]")
+        return
+
+    choices = [questionary.Choice(u, value=u) for u in sorted(users)]
+    username = questionary.select("Select user:", choices=choices).ask()
+    if not username:
+        return
+
+    password = questionary.password("New password:").ask()
+    if not password:
+        return
+    confirm_pw = questionary.password("Confirm password:").ask()
+    if password != confirm_pw:
+        console.print("[red][FAIL][/red] Passwords do not match.")
+        return
+
+    resp = ssh.send_command(
+        f"RESETPASSWORD -N:{username} -P:{password}", timeout=10,
+    )
+    if "error" in resp.lower():
+        console.print(f"[red][FAIL][/red] {resp.strip()}")
+    else:
+        console.print(f"[green][OK][/green] Password reset for '{username}'.")
+
+
+def _account_locked_users(ssh: "CrestronSSH") -> None:
+    """Display locked-out user accounts."""
+    raw = ssh.send_command("LISTLOCKEDUSERS", timeout=10)
+    lines = [
+        l.strip() for l in raw.splitlines()
+        if l.strip()
+        and not l.strip().upper().startswith("LISTLOCKED")
+        and not l.strip().startswith("-")
+        and not l.strip().startswith("=")
+    ]
+
+    if not lines or (len(lines) == 1 and "no" in lines[0].lower()):
+        console.print("\n[green][OK][/green] No locked-out users.\n")
+        return
+
+    table = Table(title="Locked Users", border_style="yellow")
+    table.add_column("Username", style="bold red")
+    for line in lines:
+        table.add_row(line.split()[0] if line.split() else line)
+
+    console.print()
+    console.print(table)
+    console.print()
+
+
+def _flow_account_mgmt(config: Config, host: str | None = None,
+                       username: str | None = None,
+                       password: str | None = None) -> Config:
+    """Account Management submenu with persistent SSH connection."""
+    from .ssh import CrestronSSH
+
+    _header("Account Management")
+
+    if not host:
+        host = questionary.text("Processor hostname or IP:").ask()
+        if not host:
+            return config
+
+    if not username or not password:
+        creds = _prompt_credentials(config)
+        if not creds:
+            return config
+        username, password = creds
+
+    try:
+        ssh = CrestronSSH(host, username, password, use_key_auth=config.ssh_key_auth)
+        ssh.connect()
+    except Exception as e:
+        console.print(f"[red][FAIL][/red] Connection failed: {e}")
+        _pause()
+        return config
+
+    console.print(f"[green][OK][/green] Connected to {host} ({ssh.model})\n")
+
+    try:
+        while True:
+            _header(f"Account Management — {host} ({ssh.model})")
+            choice = questionary.select(
+                f"Accounts — {host}",
+                choices=[
+                    questionary.Choice("List Users", value="list"),
+                    questionary.Choice("Create User", value="create"),
+                    questionary.Choice("Delete User", value="delete"),
+                    questionary.Choice("Change Access Level", value="level"),
+                    questionary.Choice("Reset Password", value="password"),
+                    questionary.Choice("View Locked Users", value="locked"),
+                    questionary.Choice("Back", value="back"),
+                ],
+            ).ask()
+
+            if choice is None or choice == "back":
+                break
+
+            try:
+                if choice == "list":
+                    _account_list_users(ssh)
+                elif choice == "create":
+                    _account_create_user(ssh)
+                elif choice == "delete":
+                    _account_delete_user(ssh)
+                elif choice == "level":
+                    _account_change_level(ssh)
+                elif choice == "password":
+                    _account_reset_password(ssh)
+                elif choice == "locked":
+                    _account_locked_users(ssh)
             except Exception as e:
                 console.print(f"[red][FAIL][/red] {e}")
 
