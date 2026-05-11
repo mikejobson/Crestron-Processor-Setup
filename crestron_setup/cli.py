@@ -1179,7 +1179,7 @@ def _flow_firmware_audit(config: Config) -> None:
         query_firmware_server,
         version_compare,
     )
-    from .ssh import CrestronSSH
+    from .ssh import CrestronSSH, sftp_upload
 
     _header("Firmware Audit")
     devices = discover_devices(config, console)
@@ -1418,6 +1418,119 @@ def _flow_firmware_audit(config: Config) -> None:
     console.print("  ".join(summary_parts))
     console.print()
     console.print(f"[dim]{len(results)} device(s) scanned. No changes were made.[/dim]")
+    console.print()
+
+    # Offer to update devices that have firmware available
+    updatable = [r for r in results if r.status == "update-available"]
+    up_to_date_with_fw = [r for r in results if r.status in ("up-to-date", "newer") and r.available_version]
+    forceable = updatable + up_to_date_with_fw
+
+    if not forceable:
+        _pause()
+        return
+
+    # Ask if the user wants to push firmware
+    update_choices: list[questionary.Choice] = []
+    if updatable:
+        update_choices.append(questionary.Choice(
+            f"Update {len(updatable)} device(s) with available updates",
+            value="update",
+        ))
+    if forceable:
+        update_choices.append(questionary.Choice(
+            f"Force firmware on selected devices (including up-to-date)",
+            value="force",
+        ))
+    update_choices.append(questionary.Choice("No, just view results", value="skip"))
+
+    update_action = questionary.select(
+        "Push firmware to devices?", choices=update_choices,
+    ).ask()
+
+    if not update_action or update_action == "skip":
+        _pause()
+        return
+
+    # Pick which devices to update
+    if update_action == "update":
+        candidates = updatable
+    else:
+        candidates = forceable
+
+    if len(candidates) == 1:
+        targets = candidates
+    else:
+        dev_choices = [
+            questionary.Choice(
+                f"{(r.device.ip or r.device.hostname):<17} {r.device.model or '?':<10} "
+                f"v{r.current_version} → v{r.available_version}  ({r.status})",
+                value=r,
+                checked=r.status == "update-available",
+            )
+            for r in candidates
+        ]
+        targets = questionary.checkbox(
+            "Select devices to update:", choices=dev_choices,
+        ).ask()
+        if not targets:
+            console.print("[dim]No devices selected.[/dim]")
+            _pause()
+            return
+
+    # Download firmware files as needed, then upload to each device
+    console.print()
+
+    def _update_device(r: _AuditResult) -> tuple[str, bool, str]:
+        """Download (if needed) and upload firmware to one device.
+
+        Returns (host, success, detail).
+        """
+        host = r.device.ip or r.device.hostname
+        model = (r.device.model or "").upper()
+
+        # Find or download the firmware file
+        fw_path, fw_ver = find_local_firmware(model, config)
+        if not fw_path:
+            fw_path, dl_msg = download_firmware_quiet(model, config)
+            if not fw_path:
+                return host, False, f"No firmware file: {dl_msg}"
+            fw_ver, _ = _parse_puf_metadata(fw_path)
+
+        # Upload via SFTP
+        if not sftp_upload(
+            host, username, password, str(fw_path), "/firmware",
+            use_key_auth=config.ssh_key_auth,
+        ):
+            return host, False, "SFTP upload failed"
+
+        # Trigger firmware install
+        try:
+            with CrestronSSH(host, username, password, use_key_auth=config.ssh_key_auth) as ssh:
+                ssh.send_command("PUF", timeout=60)
+        except Exception:
+            pass  # PUF triggers reboot — connection drops
+
+        ver_label = fw_ver or (fw_path.name if fw_path else "?")
+        return host, True, f"v{ver_label} uploaded — installing (device will reboot)"
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+
+    with console.status(
+        f"Updating {len(targets)} device(s)…", spinner="dots",
+    ):
+        update_futures = {}
+        with ThreadPoolExecutor(max_workers=min(len(targets), 8)) as pool:
+            for r in targets:
+                update_futures[pool.submit(_update_device, r)] = r
+            update_results: list[tuple[str, bool, str]] = []
+            for fut in _as_completed(update_futures):
+                update_results.append(fut.result())
+
+    console.print()
+    for host, ok, detail in sorted(update_results, key=lambda x: x[0]):
+        tag = "[green][OK][/green]" if ok else "[red][FAIL][/red]"
+        console.print(f"  {tag} {host:<17} {detail}")
+    console.print()
 
     _pause()
 
