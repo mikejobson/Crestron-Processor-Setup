@@ -2551,6 +2551,57 @@ def _account_list_users(ssh: "CrestronSSH") -> None:
     console.print(f"[dim]  {len(users)} user(s)[/dim]\n")
 
 
+def _activate_new_account(host: str, username: str, password: str) -> None:
+    """Log in as a newly created user to clear the expired-password prompt.
+
+    Crestron marks ADDUSER passwords as temporary.  The first SSH login
+    shows "Your temporary password is expired!" and prompts for a new
+    password.  We automate this by re-setting the same password so the
+    user can log in without interruption.
+    """
+    import paramiko
+    from .ssh import _read_until, CONNECT_TIMEOUT
+
+    console.print("[cyan][INFO][/cyan] Activating account…", end=" ")
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(
+            host, username=username, password=password,
+            timeout=CONNECT_TIMEOUT, look_for_keys=False, allow_agent=False,
+        )
+    except Exception as exc:
+        console.print(f"[yellow][WARN][/yellow] Could not activate: {exc}")
+        return
+
+    try:
+        channel = client.invoke_shell(width=200, height=50)
+        channel.settimeout(30)
+
+        # Wait for either the expired-password prompt or a normal CLI prompt
+        output = _read_until(channel, [b"Password:", b">"], timeout=15)
+
+        if b"password" in output.lower() and b">" not in output:
+            # Expired password flow — send new password
+            channel.sendall(password.encode() + b"\r")
+            output2 = _read_until(
+                channel, [b"Verify", b"verify", b"Password:", b">"], timeout=10,
+            )
+            if b"verify" in output2.lower():
+                channel.sendall(password.encode() + b"\r")
+                _read_until(channel, [b">", b"successfully"], timeout=10)
+            console.print("[green][OK][/green] Account activated.")
+        else:
+            # No expired-password prompt — already active
+            console.print("[green][OK][/green] Account already active.")
+
+        channel.close()
+    except Exception as exc:
+        console.print(f"[yellow][WARN][/yellow] Activation issue: {exc}")
+    finally:
+        client.close()
+
+
 def _account_create_user(ssh: "CrestronSSH") -> None:
     """Create a new user account."""
     username = questionary.text("Username:").ask()
@@ -2593,6 +2644,11 @@ def _account_create_user(ssh: "CrestronSSH") -> None:
             console.print(f"[yellow][WARN][/yellow] Group assignment: {resp.strip()}")
         else:
             console.print(f"[green][OK][/green] Added to '{group}' group.")
+
+    # Activate the account by logging in as the new user and confirming
+    # the temporary password.  Crestron marks new passwords as expired,
+    # so the first SSH login prompts "Password:" to set a new one.
+    _activate_new_account(ssh.host, username, password)
 
 
 def _account_delete_user(ssh: "CrestronSSH") -> None:
