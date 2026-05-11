@@ -2384,7 +2384,7 @@ def _flow_ip_table(config: Config, host: str | None = None,
         if not host:
             return config
 
-    if not username or not password:
+    if username is None or password is None:
         creds = _prompt_credentials(config)
         if not creds:
             return config
@@ -2895,7 +2895,7 @@ def _flow_account_mgmt(config: Config, host: str | None = None,
         if not host:
             return config
 
-    if not username or not password:
+    if username is None or password is None:
         creds = _prompt_credentials(config)
         if not creds:
             return config
