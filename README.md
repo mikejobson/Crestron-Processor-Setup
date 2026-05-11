@@ -93,18 +93,18 @@ Settings are stored in `~/.config/crestron-setup/config.yaml` (macOS/Linux) or `
 
 Copy `config.example.yaml` to get started. Key settings:
 
-| Setting           | Default                    | Description                                                              |
-| ----------------- | -------------------------- | ------------------------------------------------------------------------ |
-| `timezone`        | `33` (GMT Standard Time)   | Crestron timezone ID                                                     |
-| `ntp_server`      | `pool.ntp.org`             | NTP server address                                                       |
-| `pubkey_file`     | `~/.ssh/id_rsa.pub`        | SSH public key — local path or URL (e.g. `https://github.com/user.keys`) |
-| `firmware_dir`    | `~/Downloads`              | Local firmware directory (fallback)                                      |
-| `web_port`        | `8080`                     | Web server port                                                          |
-| `secure_web_port` | `8443`                     | Secure web server port                                                   |
-| `firmware_urls`   | _(empty)_                  | Per-model firmware download URLs                                         |
-| `firmware_server` | _(empty)_                  | Firmware server API base URL (see below)                                 |
-| `default_username`| _(empty)_                  | Pre-filled username for SSH connection prompts                           |
-| `ssh_key_auth`    | `true`                     | Try SSH key auth (agent + key files) before prompting for password        |
+| Setting            | Default                  | Description                                                              |
+| ------------------ | ------------------------ | ------------------------------------------------------------------------ |
+| `timezone`         | `33` (GMT Standard Time) | Crestron timezone ID                                                     |
+| `ntp_server`       | `pool.ntp.org`           | NTP server address                                                       |
+| `pubkey_file`      | `~/.ssh/id_rsa.pub`      | SSH public key — local path or URL (e.g. `https://github.com/user.keys`) |
+| `firmware_dir`     | `~/Downloads`            | Local firmware directory (fallback)                                      |
+| `web_port`         | `8080`                   | Web server port                                                          |
+| `secure_web_port`  | `8443`                   | Secure web server port                                                   |
+| `firmware_urls`    | _(empty)_                | Per-model firmware download URLs                                         |
+| `firmware_server`  | _(empty)_                | Firmware server API base URL (see below)                                 |
+| `default_username` | _(empty)_                | Pre-filled username for SSH connection prompts                           |
+| `ssh_key_auth`     | `true`                   | Try SSH key auth (agent + key files) before prompting for password       |
 
 ### SSH Key Authentication
 
@@ -146,6 +146,7 @@ This enables version comparison without downloading the full firmware file, and 
 Import a list of devices from a CSV or YAML file for bulk provisioning. Supports per-device credentials and profile assignments.
 
 **CSV format** (`examples/batch.csv`):
+
 ```csv
 hostname,username,password,profile
 192.168.1.10,admin,admin,default
@@ -154,6 +155,7 @@ hostname,username,password,profile
 ```
 
 **YAML format** (`examples/batch.yaml`):
+
 ```yaml
 devices:
   - hostname: 192.168.1.10
@@ -216,22 +218,23 @@ Profiles let you customise provisioning for different device types. The top-leve
 ```yaml
 profiles:
   touch-panels:
-    models: ["TSW-*", "TS-*"]    # Glob patterns for auto-matching
-    web_port: false               # false = skip this command
+    models: ["TSW-*", "TS-*"] # Glob patterns for auto-matching
+    web_port: false # false = skip this command
     secure_web_port: false
     fips_mode: false
-    extra_commands:                # Custom commands after standard config
-      - command: "PROGCOMMENTS OFF"
-        label: "Disable program comments"
+    extra_commands: # Custom commands after standard config
+      - command: "VKENABLE OFF"
+        label: "Disable virtual key bar"
 
   locked-down:
     models: ["CP4*", "MC4*"]
-    fips_mode: "ON"               # Override a value
+    fips_mode: "ON" # Override a value
     user_login_attempts: 3
     user_lockout_time: "30m"
 ```
 
 Key concepts:
+
 - **`false`** = skip this command entirely (it won't be sent to the device)
 - **Omitted** = inherit the default value
 - **`models`** = glob patterns matched against `device.model` for auto-suggestion
