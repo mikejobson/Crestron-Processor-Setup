@@ -2451,8 +2451,16 @@ def _flow_ip_table(config: Config, host: str | None = None,
 # --------------------------------------------------------------------------- #
 
 
-# Standard Crestron access level groups
+# Standard Crestron access levels (display names) and their group names.
+# LISTUSERS shows singular access levels; ADDUSERTOGROUP needs plural group names.
 ACCESS_LEVELS = ["Administrator", "Programmer", "Operator", "User", "Connect"]
+_LEVEL_TO_GROUP = {
+    "Administrator": "Administrators",
+    "Programmer": "Programmers",
+    "Operator": "Operators",
+    "User": "Users",
+    "Connect": "Connections",
+}
 
 
 @dataclass
@@ -2577,13 +2585,14 @@ def _account_create_user(ssh: "CrestronSSH") -> None:
     ).ask()
 
     if level:
+        group = _LEVEL_TO_GROUP.get(level, level)
         resp = ssh.send_command(
-            f"ADDUSERTOGROUP -N:{username} -G:{level}", timeout=10,
+            f"ADDUSERTOGROUP -N:{username} -G:{group}", timeout=10,
         )
         if "error" in resp.lower():
             console.print(f"[yellow][WARN][/yellow] Group assignment: {resp.strip()}")
         else:
-            console.print(f"[green][OK][/green] Added to '{level}' group.")
+            console.print(f"[green][OK][/green] Added to '{group}' group.")
 
 
 def _account_delete_user(ssh: "CrestronSSH") -> None:
@@ -2648,7 +2657,13 @@ def _account_change_level(ssh: "CrestronSSH") -> None:
 
     # Remove from current access-level groups
     for group in current_group_list:
-        if group in ACCESS_LEVELS or any(group.rstrip("s") == lvl.rstrip("s") for lvl in ACCESS_LEVELS):
+        # Match both singular and plural group names
+        group_lower = group.lower()
+        is_access_group = any(
+            group_lower == lvl.lower() or group_lower == g.lower()
+            for lvl, g in _LEVEL_TO_GROUP.items()
+        )
+        if is_access_group:
             resp = ssh.send_command(
                 f"REMOVEUSERFROMGROUP -N:{selected.username} -G:{group}", timeout=10,
             )
@@ -2656,8 +2671,9 @@ def _account_change_level(ssh: "CrestronSSH") -> None:
                 console.print(f"[yellow][WARN][/yellow] Remove from {group}: {resp.strip()}")
 
     # Add to new group
+    new_group = _LEVEL_TO_GROUP.get(new_level, new_level)
     resp = ssh.send_command(
-        f"ADDUSERTOGROUP -N:{selected.username} -G:{new_level}", timeout=10,
+        f"ADDUSERTOGROUP -N:{selected.username} -G:{new_group}", timeout=10,
     )
     if "error" in resp.lower():
         console.print(f"[red][FAIL][/red] {resp.strip()}")
