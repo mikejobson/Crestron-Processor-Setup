@@ -10,6 +10,7 @@ using GET (read) and POST (write) with partial JSON payloads.
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 import httpx
@@ -78,9 +79,8 @@ class NvxClient:
                 continue
 
         # Fallback: HTTP basic auth for the session
-        self._http.headers["Authorization"] = httpx.BasicAuth(
-            username, password
-        )._auth_header
+        token = base64.b64encode(f"{username}:{password}".encode()).decode()
+        self._http.headers["Authorization"] = f"Basic {token}"
 
     def close(self) -> None:
         """Close the HTTP client."""
@@ -110,7 +110,7 @@ class NvxClient:
             resp.raise_for_status()
             try:
                 return resp.json()
-            except Exception:
+            except ValueError:
                 return {}
         except httpx.HTTPStatusError as exc:
             raise NvxApiError(
@@ -334,8 +334,10 @@ class NvxClient:
         elif info.device_mode == "Receiver":
             streams = self.get_receive_streams()
         else:
-            # Try both
-            streams = self.get_transmit_streams() or self.get_receive_streams()
+            # Unknown mode — try transmit first, then receive
+            streams = self.get_transmit_streams()
+            if not streams:
+                streams = self.get_receive_streams()
 
         usb_ports = self.get_usb_ports()
 

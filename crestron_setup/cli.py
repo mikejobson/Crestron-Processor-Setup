@@ -36,6 +36,8 @@ from .provisioning import (
     restore_device,
     upload_program,
 )
+import httpx
+
 from .nvx import NvxApiError, NvxClient
 from .nvx_models import NvxDeviceStatus
 from .ssh import CrestronFirstBoot
@@ -3581,7 +3583,7 @@ def _nvx_connect(
         client = NvxClient(host)
         client.login(username, password)
         return client
-    except Exception as e:
+    except (NvxApiError, httpx.HTTPError, OSError) as e:
         console.print(f"[red][FAIL][/red] Could not connect to {host}: {e}")
         return None
 
