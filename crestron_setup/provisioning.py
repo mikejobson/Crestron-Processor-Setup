@@ -573,16 +573,17 @@ def _run_provisioning_inner(
             if not model_name:
                 tracker.skip(5, "No model detected")
             else:
+                dl_msg = "No firmware file found"
                 fw_path, fw_version = find_local_firmware(model_name, config)
                 if not fw_path:
                     # Try downloading from configured URL
                     tracker.details[5] = "Downloading firmware…"
                     live.update(tracker)
-                    fw_path = download_firmware_quiet(model_name, config)
+                    fw_path, dl_msg = download_firmware_quiet(model_name, config)
                     if fw_path:
                         fw_version, _ = _parse_puf_metadata(fw_path)
                 if not fw_path:
-                    tracker.skip(5, "No firmware file found")
+                    tracker.skip(5, dl_msg)
                 elif current_puf_version and fw_version:
                     cmp = version_compare(fw_version, current_puf_version)
                     if cmp == 0:
@@ -863,15 +864,16 @@ def _run_dry_run_inner(
             if not fw_model:
                 tracker.skip(5, "No model detected")
             else:
+                dl_msg = "No firmware available"
                 fw_path, fw_version = find_local_firmware(fw_model, config)
                 if not fw_path:
                     tracker.details[5] = "Checking download URL…"
                     live.update(tracker)
-                    fw_path = download_firmware_quiet(fw_model, config)
+                    fw_path, dl_msg = download_firmware_quiet(fw_model, config)
                     if fw_path:
                         fw_version, _ = _parse_puf_metadata(fw_path)
                 if not fw_path:
-                    tracker.skip(5, "No firmware available")
+                    tracker.skip(5, dl_msg)
                 elif current_puf_version and fw_version:
                     cmp = version_compare(fw_version, current_puf_version)
                     if cmp == 0:

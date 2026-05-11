@@ -75,15 +75,15 @@ def query_firmware_server(
 def download_from_server(
     info: FirmwareServerInfo,
     console: Console | None = None,
-) -> Path | None:
+) -> tuple[Path | None, str]:
     """Download firmware using the signed URL from the firmware server.
 
     Verifies the SHA256 hash after download if provided.
-    When console is None, runs silently (used by download_firmware_quiet).
-    Returns the local path or None on failure.
+    Returns (local_path, status_message). The path is None on failure and
+    the status message describes what happened (useful for headless callers).
     """
     if not info.download_url:
-        return None
+        return None, "No download URL in server response"
 
     cache = _cache_dir()
     cache.mkdir(parents=True, exist_ok=True)
@@ -93,13 +93,13 @@ def download_from_server(
 
     # Skip download if we already have this exact file
     if dest.exists() and info.file_hash:
-        existing_hash = _sha256_file(dest)
+        existing_hash = _hash_file(dest, info.file_hash)
         if existing_hash == info.file_hash:
             if console:
                 console.print(
                     f"[green][OK][/green] Already cached: {dest.name} (hash verified)"
                 )
-            return dest
+            return dest, "cached"
 
     try:
         if console:
@@ -131,42 +131,52 @@ def download_from_server(
 
         # Verify hash
         if info.file_hash:
-            actual_hash = _sha256_file(dest)
+            actual_hash = _hash_file(dest, info.file_hash)
             if actual_hash != info.file_hash:
+                msg = (
+                    f"Hash mismatch — expected {info.file_hash[:16]}…, "
+                    f"got {actual_hash[:16]}…"
+                )
                 if console:
-                    console.print(
-                        f"[red][FAIL][/red] Hash mismatch — expected {info.file_hash[:16]}…, "
-                        f"got {actual_hash[:16]}…"
-                    )
+                    console.print(f"[red][FAIL][/red] {msg}")
                 dest.unlink()
-                return None
+                return None, msg
 
         if console:
             console.print(f"[green][OK][/green] Downloaded: {dest.name}")
             if info.file_hash:
-                console.print(f"  [dim]SHA256 verified[/dim]")
-        return dest
+                console.print(f"  [dim]Hash verified[/dim]")
+        return dest, "downloaded"
 
     except httpx.HTTPStatusError as e:
+        msg = f"HTTP {e.response.status_code}"
         if console:
-            console.print(f"[red][FAIL][/red] HTTP {e.response.status_code}: {e}")
+            console.print(f"[red][FAIL][/red] {msg}: {e}")
     except httpx.RequestError as e:
+        msg = f"Download failed: {e}"
         if console:
-            console.print(f"[red][FAIL][/red] Download failed: {e}")
+            console.print(f"[red][FAIL][/red] {msg}")
     except Exception as e:
+        msg = f"Unexpected error: {e}"
         if console:
-            console.print(f"[red][FAIL][/red] Unexpected error: {e}")
+            console.print(f"[red][FAIL][/red] {msg}")
         if dest.exists():
             dest.unlink()
 
-    return None
+    return None, msg
 
 
-def _sha256_file(path: Path) -> str:
-    """Compute SHA256 hex digest of a file."""
+def _hash_file(path: Path, expected_hash: str = "") -> str:
+    """Compute a hex digest of a file, matching the algorithm to expected_hash length.
+
+    MD5 = 32 hex chars, SHA256 = 64 hex chars. Defaults to SHA256.
+    """
     import hashlib
 
-    h = hashlib.sha256()
+    if len(expected_hash) == 32:
+        h = hashlib.md5()
+    else:
+        h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
@@ -366,7 +376,7 @@ def download_firmware(
         info = query_firmware_server(model, config.firmware_server)
         if info and info.download_url:
             console.print(f"[cyan][INFO][/cyan] Firmware server: {model} v{info.version}")
-            result = download_from_server(info, console=console)
+            result, _msg = download_from_server(info, console=console)
             if result:
                 return result
             console.print("[yellow][WARN][/yellow] Server download failed, trying direct URL…")
@@ -449,25 +459,32 @@ def download_firmware(
 def download_firmware_quiet(
     model: str,
     config: Config,
-) -> Path | None:
-    """Download firmware for a model silently (no console output).
+) -> tuple[Path | None, str]:
+    """Download firmware for a model without console output.
 
     Used during provisioning to auto-download when no local file exists.
     Checks firmware server API first, then falls back to per-model URLs.
-    Returns the local path to the downloaded file, or None on failure.
+    Returns (local_path, status_message). The path is None on failure and
+    the status message describes what happened.
     """
-    # Try firmware server API first (silent)
+    # Try firmware server API first
     if config.firmware_server:
         info = query_firmware_server(model, config.firmware_server)
         if info and info.download_url:
-            result = download_from_server(info, console=None)
+            result, msg = download_from_server(info, console=None)
             if result:
-                return result
+                return result, msg
+            return None, f"Server download failed: {msg}"
+        elif info and not info.download_url:
+            # Server knows about this model but has no download URL
+            return None, "Server has no download URL for this model"
 
     # Fall back to per-model direct URL
     source = config.firmware_urls.get(model.upper())
     if not source or not source.url:
-        return None
+        if config.firmware_server:
+            return None, "Model not found on firmware server"
+        return None, "No firmware source configured"
 
     cache = _cache_dir()
     cache.mkdir(parents=True, exist_ok=True)
@@ -501,7 +518,11 @@ def download_firmware_quiet(
                 for chunk in resp.iter_bytes(chunk_size=65536):
                     f.write(chunk)
 
-        return dest
+        return dest, "downloaded"
 
-    except Exception:
-        return None
+    except httpx.HTTPStatusError as e:
+        return None, f"HTTP {e.response.status_code} from firmware URL"
+    except httpx.RequestError as e:
+        return None, f"Download failed: {e}"
+    except Exception as e:
+        return None, f"Download error: {e}"

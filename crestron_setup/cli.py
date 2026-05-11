@@ -1304,7 +1304,7 @@ def _flow_firmware_audit(config: Config) -> None:
 
         # 3. Try downloading quietly
         if not fw_version:
-            fw_path = download_firmware_quiet(fw_model, config)
+            fw_path, _dl_msg = download_firmware_quiet(fw_model, config)
             if fw_path:
                 fw_version, _ = _parse_puf_metadata(fw_path)
                 # download_firmware_quiet tries server first, then direct URL
