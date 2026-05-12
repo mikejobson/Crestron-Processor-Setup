@@ -5,9 +5,9 @@ access and file transfers.  This module provides ``CrestronCTP``, which mirrors
 the ``CrestronSSH`` API (connect / send_command / disconnect) so it can be used
 as a drop-in replacement for IP table management and other console operations.
 
-File uploads use the XMODEM-1K CRC protocol triggered by the ``XPUTFILE``
-console command.  Project deployment extracts a CH5Z into ``\\Display`` via
-``SELECTPROJECT``.
+File uploads use the XMODEM-1K CRC protocol.  General file transfers are
+triggered by ``XPUTFILE``, while project deployment uses ``PUTDISPLAY`` which
+combines XMODEM upload with automatic extraction and activation.
 """
 
 from __future__ import annotations

@@ -1203,12 +1203,9 @@ def _deploy_project_single(
             def _progress_cb(sent: int, total: int) -> None:
                 progress.update(task_id, completed=sent)
 
-            ctp.xmodem_upload(local, remote_dir="\\Display", progress_callback=_progress_cb)
-            progress.update(task_id, description="Deploying project…", completed=file_size)
+            ctp.upload_project(local, progress_callback=_progress_cb)
+            progress.update(task_id, completed=file_size)
 
-        # Deploy outside progress display
-        con.print(f"[cyan][INFO][/cyan] Running SELECTPROJECT…")
-        ctp.send_command(f"SELECTPROJECT \\Display\\{local.name}", timeout=30)
         ctp.disconnect()
         con.print(f"[green][OK][/green] Project deployed to {host}")
 
@@ -1239,13 +1236,9 @@ def _deploy_project_worker(
             pct = int(100 * sent / total) if total else 0
             tracker.update(f"Upload ({pct}%)")
 
-        ctp.xmodem_upload(local, remote_dir="\\Display", progress_callback=_progress_cb)
+        ctp.upload_project(local, progress_callback=_progress_cb)
         tracker.ok("Upload")
-
-        tracker.start("Deploy")
-        ctp.send_command(f"SELECTPROJECT \\Display\\{local.name}", timeout=30)
         ctp.disconnect()
-        tracker.ok("Deploy")
         return True
 
     except Exception as e:
