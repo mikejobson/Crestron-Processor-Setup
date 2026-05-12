@@ -212,10 +212,60 @@ class CrestronCTP:
         if not self._wait_for_xmodem_start(timeout=15):
             raise RuntimeError("Device did not enter XMODEM receive mode")
 
-        # Read file into memory
+        self._xmodem_send_file(local, progress_callback)
+        self._read_until_prompt(timeout=10)
+        return True
+
+    def upload_project(
+        self,
+        ch5z_path: str | Path,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> bool:
+        """Upload a CH5Z project and deploy it on the UC Engine.
+
+        Uses the ``PUTDISPLAY`` command which combines XMODEM upload with
+        automatic project extraction and activation — this is the same
+        mechanism Crestron Toolbox uses.  The device shows "Loading Project"
+        during transfer and "Extracting Project" once complete.
+
+        Unlike ``XPUTFILE`` + ``SELECTPROJECT``, ``PUTDISPLAY`` properly
+        triggers the on-device UI feedback and reliably updates the project.
+        """
+        if not self._sock:
+            raise RuntimeError("Not connected")
+
+        local = Path(ch5z_path).expanduser()
+        if not local.exists():
+            raise FileNotFoundError(f"Local file not found: {local}")
+
+        # PUTDISPLAY takes no arguments — just triggers XMODEM receive
+        self._send(b"PUTDISPLAY\r\n")
+
+        if not self._wait_for_xmodem_start(timeout=15):
+            raise RuntimeError("Device did not enter XMODEM receive mode")
+
+        self._xmodem_send_file(local, progress_callback)
+
+        # PUTDISPLAY responds with "Transfer successful." then a prompt
+        buf = self._read_until_prompt(timeout=60)
+        resp = buf.decode("ascii", errors="ignore")
+        if "transfer successful" not in resp.lower():
+            raise RuntimeError(f"Unexpected PUTDISPLAY response: {resp.strip()}")
+        return True
+
+    def _xmodem_send_file(
+        self,
+        local: Path,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> None:
+        """Send a file over an active XMODEM-1K CRC session.
+
+        The last block is padded with ``\\x00`` (not the traditional ``SUB``
+        / ``0x1A``) so that binary payloads like ZIP archives are not
+        corrupted by trailing padding bytes.
+        """
         file_data = local.read_bytes()
 
-        # Send XMODEM-1K blocks
         block_num = 1
         offset = 0
         retries = 0
@@ -223,7 +273,8 @@ class CrestronCTP:
         while offset < len(file_data):
             chunk = file_data[offset:offset + _XMODEM_BLOCK_SIZE]
             if len(chunk) < _XMODEM_BLOCK_SIZE:
-                chunk += bytes([_SUB]) * (_XMODEM_BLOCK_SIZE - len(chunk))
+                # Null-pad to preserve binary integrity (ZIP end-of-central-dir)
+                chunk += b"\x00" * (_XMODEM_BLOCK_SIZE - len(chunk))
 
             crc = _crc16_xmodem(chunk)
             seq = block_num & 0xFF
@@ -235,7 +286,6 @@ class CrestronCTP:
 
             self._sock.send(packet)
 
-            # Wait for ACK / NAK
             resp = self._recv_byte(timeout=10)
             if resp == _ACK:
                 offset += _XMODEM_BLOCK_SIZE
@@ -258,32 +308,7 @@ class CrestronCTP:
                         f"XMODEM transfer failed: unexpected response 0x{resp:02x}"
                     )
 
-        # End of transmission
         self._sock.send(bytes([_EOT]))
-        # Wait for final ACK and prompt
-        self._read_until_prompt(timeout=10)
-        return True
-
-    def upload_project(
-        self,
-        ch5z_path: str | Path,
-        progress_callback: Callable[[int, int], None] | None = None,
-    ) -> bool:
-        """Upload a CH5Z project and deploy it on the UC Engine.
-
-        Uploads the file to ``\\Display`` via XMODEM, then runs
-        ``SELECTPROJECT`` to extract and activate it.
-        """
-        local = Path(ch5z_path).expanduser()
-        self.xmodem_upload(
-            local, remote_dir="\\Display", progress_callback=progress_callback,
-        )
-
-        # Deploy
-        resp = self.send_command(
-            f"SELECTPROJECT \\Display\\{local.name}", timeout=30,
-        )
-        return True
 
     # ------------------------------------------------------------------ #
     #  Low-level I/O helpers
