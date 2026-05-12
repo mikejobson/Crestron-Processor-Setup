@@ -2445,37 +2445,88 @@ class _IPTableEntry:
 
 
 def _parse_ipt_output(raw: str) -> list[_IPTableEntry]:
-    """Parse pipe-delimited output from IPT -T into structured entries."""
+    """Parse IPT -T output into structured entries.
+
+    Handles two formats:
+    - **Pipe-delimited** (processors): columns separated by ``|``
+    - **Whitespace-delimited** (UC Engines): fixed-width columns with no ``|``
+
+    The UC Engine format looks like::
+
+        CIP_ID  Type   Status     DevID  Port   IP Address/SiteName     RoomID
+            04  Gway    ONLINE        00  41794  10.100.203.139             (null)
+    """
     entries: list[_IPTableEntry] = []
     lines = raw.splitlines()
-    in_data = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("---"):
-            in_data = True
-            continue
-        if not in_data:
-            continue
-        if not stripped or "|" not in stripped:
-            continue
-        parts = [p.strip() for p in stripped.split("|")]
-        if len(parts) < 6:
-            continue
-        try:
-            cip_id = int(parts[0])
-        except (ValueError, IndexError):
-            continue
-        entries.append(_IPTableEntry(
-            cip_id=cip_id,
-            entry_type=parts[1] if len(parts) > 1 else "",
-            status=parts[2] if len(parts) > 2 else "",
-            dev_id=parts[3] if len(parts) > 3 else "",
-            port=parts[4] if len(parts) > 4 else "",
-            address=parts[5] if len(parts) > 5 else "",
-            model=parts[6] if len(parts) > 6 else "",
-            description=parts[7] if len(parts) > 7 else "",
-            room_id=parts[8] if len(parts) > 8 else "",
-        ))
+
+    # Detect format: if any data-like line contains "|", use pipe parsing
+    use_pipe = any("|" in ln and not ln.strip().startswith("---") for ln in lines)
+
+    if use_pipe:
+        in_data = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("---"):
+                in_data = True
+                continue
+            if not in_data:
+                continue
+            if not stripped or "|" not in stripped:
+                continue
+            parts = [p.strip() for p in stripped.split("|")]
+            if len(parts) < 6:
+                continue
+            try:
+                cip_id = int(parts[0])
+            except (ValueError, IndexError):
+                continue
+            entries.append(_IPTableEntry(
+                cip_id=cip_id,
+                entry_type=parts[1] if len(parts) > 1 else "",
+                status=parts[2] if len(parts) > 2 else "",
+                dev_id=parts[3] if len(parts) > 3 else "",
+                port=parts[4] if len(parts) > 4 else "",
+                address=parts[5] if len(parts) > 5 else "",
+                model=parts[6] if len(parts) > 6 else "",
+                description=parts[7] if len(parts) > 7 else "",
+                room_id=parts[8] if len(parts) > 8 else "",
+            ))
+    else:
+        # Whitespace-delimited (UC Engine format)
+        header_seen = False
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.upper().startswith("CIP_ID"):
+                header_seen = True
+                continue
+            if not header_seen:
+                # Skip preamble lines like "IP Table:"
+                continue
+            parts = stripped.split()
+            if len(parts) < 6:
+                continue
+            try:
+                cip_id = int(parts[0])
+            except (ValueError, IndexError):
+                continue
+            # Rejoin remaining fields after the first 6 as room_id
+            # Format: CIP_ID Type Status DevID Port Address [RoomID...]
+            room_id = " ".join(parts[6:]) if len(parts) > 6 else ""
+            if room_id == "(null)":
+                room_id = ""
+            entries.append(_IPTableEntry(
+                cip_id=cip_id,
+                entry_type=parts[1],
+                status=parts[2],
+                dev_id=parts[3],
+                port=parts[4],
+                address=parts[5],
+                model="",
+                description="",
+                room_id=room_id,
+            ))
     return entries
 
 
