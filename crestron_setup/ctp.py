@@ -62,6 +62,48 @@ def _crc16_xmodem(data: bytes) -> int:
     return crc
 
 
+def _pad_zip_to_block_boundary(data: bytes, block_size: int = 1024) -> bytes:
+    """Pad a ZIP archive to a *block_size* boundary using the ZIP comment.
+
+    XMODEM transfers are block-aligned — any partial last block must be
+    padded.  Standard XMODEM padding (``SUB`` or null bytes) appended after
+    the ZIP's End-of-Central-Directory corrupts the archive because the
+    receiver has no way to know the original file size.
+
+    Instead we extend the ZIP *before* transfer by writing null bytes into
+    the EOCD comment field (which ZIP readers ignore), making the archive
+    an exact multiple of *block_size*.  The transferred file is then a
+    valid ZIP with no XMODEM padding needed.
+
+    Returns the (possibly extended) data unchanged if already aligned or
+    if the EOCD cannot be located.
+    """
+    remainder = len(data) % block_size
+    if remainder == 0:
+        return data
+
+    pad_needed = block_size - remainder
+    eocd_sig = b"\x50\x4b\x05\x06"
+    eocd_pos = data.rfind(eocd_sig)
+    if eocd_pos == -1:
+        return data  # Not a ZIP — caller can decide what to do
+
+    # Comment-length field is at EOCD + 20 (2 bytes, little-endian)
+    comment_len_offset = eocd_pos + 20
+    if comment_len_offset + 2 > len(data):
+        return data
+
+    current_comment_len = struct.unpack_from("<H", data, comment_len_offset)[0]
+    new_comment_len = current_comment_len + pad_needed
+    if new_comment_len > 0xFFFF:
+        return data  # Can't fit — shouldn't happen for reasonable padding
+
+    buf = bytearray(data)
+    struct.pack_into("<H", buf, comment_len_offset, new_comment_len)
+    buf += b"\x00" * pad_needed
+    return bytes(buf)
+
+
 class CrestronCTP:
     """Manage a CTP/TLS console session to a Crestron UC Engine."""
 
@@ -212,7 +254,8 @@ class CrestronCTP:
         if not self._wait_for_xmodem_start(timeout=15):
             raise RuntimeError("Device did not enter XMODEM receive mode")
 
-        self._xmodem_send_file(local, progress_callback)
+        file_data = local.read_bytes()
+        self._xmodem_send_data(file_data, len(file_data), progress_callback)
         self._read_until_prompt(timeout=10)
         return True
 
@@ -228,8 +271,10 @@ class CrestronCTP:
         mechanism Crestron Toolbox uses.  The device shows "Loading Project"
         during transfer and "Extracting Project" once complete.
 
-        Unlike ``XPUTFILE`` + ``SELECTPROJECT``, ``PUTDISPLAY`` properly
-        triggers the on-device UI feedback and reliably updates the project.
+        The CH5Z (ZIP archive) is padded to a 1024-byte boundary using the
+        ZIP comment field so that XMODEM block padding doesn't corrupt the
+        archive.  This is critical — the device receives raw XMODEM data
+        with no separate file-size metadata.
         """
         if not self._sock:
             raise RuntimeError("Not connected")
@@ -238,13 +283,17 @@ class CrestronCTP:
         if not local.exists():
             raise FileNotFoundError(f"Local file not found: {local}")
 
+        # Pad the ZIP to a 1024-byte boundary so XMODEM doesn't corrupt it
+        raw_data = local.read_bytes()
+        file_data = _pad_zip_to_block_boundary(raw_data)
+
         # PUTDISPLAY takes no arguments — just triggers XMODEM receive
         self._send(b"PUTDISPLAY\r\n")
 
         if not self._wait_for_xmodem_start(timeout=15):
             raise RuntimeError("Device did not enter XMODEM receive mode")
 
-        self._xmodem_send_file(local, progress_callback)
+        self._xmodem_send_data(file_data, len(raw_data), progress_callback)
 
         # PUTDISPLAY responds with "Transfer successful." then a prompt
         buf = self._read_until_prompt(timeout=60)
@@ -253,19 +302,17 @@ class CrestronCTP:
             raise RuntimeError(f"Unexpected PUTDISPLAY response: {resp.strip()}")
         return True
 
-    def _xmodem_send_file(
+    def _xmodem_send_data(
         self,
-        local: Path,
+        file_data: bytes,
+        original_size: int,
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> None:
-        """Send a file over an active XMODEM-1K CRC session.
+        """Send raw bytes over an active XMODEM-1K CRC session.
 
-        The last block is padded with ``\\x00`` (not the traditional ``SUB``
-        / ``0x1A``) so that binary payloads like ZIP archives are not
-        corrupted by trailing padding bytes.
+        *original_size* is the unpadded file size, used only for progress
+        reporting so the caller sees 100% at the real file boundary.
         """
-        file_data = local.read_bytes()
-
         block_num = 1
         offset = 0
         retries = 0
@@ -273,7 +320,6 @@ class CrestronCTP:
         while offset < len(file_data):
             chunk = file_data[offset:offset + _XMODEM_BLOCK_SIZE]
             if len(chunk) < _XMODEM_BLOCK_SIZE:
-                # Null-pad to preserve binary integrity (ZIP end-of-central-dir)
                 chunk += b"\x00" * (_XMODEM_BLOCK_SIZE - len(chunk))
 
             crc = _crc16_xmodem(chunk)
@@ -292,7 +338,7 @@ class CrestronCTP:
                 block_num += 1
                 retries = 0
                 if progress_callback:
-                    progress_callback(min(offset, len(file_data)), len(file_data))
+                    progress_callback(min(offset, original_size), original_size)
             elif resp == _NAK:
                 retries += 1
                 if retries > _XMODEM_MAX_RETRIES:
