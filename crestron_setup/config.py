@@ -180,6 +180,7 @@ def load_config() -> Config:
         lockout_time=str(data.get("lockout_time", "5m")),
         fips_mode=str(data.get("fips_mode", "OFF")).upper(),
         last_program_file=data.get("last_program_file", ""),
+        last_project_file=data.get("last_project_file", ""),
         firmware_urls=_parse_firmware_urls(data.get("firmware_urls")),
         firmware_server=data.get("firmware_server", ""),
         discovery_timeout=int(discovery.get("timeout", 5)),
@@ -218,6 +219,7 @@ def save_config(config: Config) -> Path:
         "lockout_time": config.lockout_time,
         "fips_mode": config.fips_mode,
         "last_program_file": config.last_program_file,
+        "last_project_file": config.last_project_file,
         "firmware_urls": fw_urls,
         "discovery": {
             "timeout": config.discovery_timeout,

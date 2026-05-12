@@ -165,6 +165,16 @@ def discover_devices(config: Config, console: Console | None = None) -> list[Dev
     return devices
 
 
+def _device_type_label(model: str) -> str:
+    """Determine device type from model string for display."""
+    upper = model.upper()
+    if upper.startswith("UC-") or upper == "UC-ENGINE":
+        return "UC Engine"
+    if any(upper.startswith(p) for p in ("TSW-", "TS-", "TST-")):
+        return "Touchpanel"
+    return "Processor"
+
+
 def print_device_table(devices: list[Device], console: Console) -> None:
     """Print a rich table of discovered devices."""
     table = Table(title="Discovered Crestron Devices")
@@ -172,17 +182,20 @@ def print_device_table(devices: list[Device], console: Console) -> None:
     table.add_column("IP Address", style="cyan")
     table.add_column("Hostname", style="green")
     table.add_column("Model", style="yellow")
+    table.add_column("Type", style="dim")
     table.add_column("Firmware", style="magenta")
     table.add_column("MAC Address", style="dim")
     table.add_column("First Boot?", style="red")
 
     for i, dev in enumerate(devices, 1):
         fb = "Yes" if dev.is_first_boot else ""
+        dev_type = _device_type_label(dev.model) if dev.model else ""
         table.add_row(
             str(i),
             dev.ip,
             dev.hostname,
             dev.model,
+            dev_type,
             dev.firmware_version,
             dev.mac,
             fb,
