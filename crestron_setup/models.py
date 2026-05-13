@@ -161,6 +161,7 @@ def resolve_profile(profile_name: str | None, config: Config) -> ResolvedProfile
         lockout_time=overrides.get("lockout_time", config.lockout_time),
         fips_mode=overrides.get("fips_mode", config.fips_mode),
         last_program_file=config.last_program_file,
+        last_project_file=config.last_project_file,
         firmware_urls=config.firmware_urls,
         firmware_server=config.firmware_server,
         discovery_timeout=config.discovery_timeout,
@@ -215,6 +216,7 @@ class Config:
     lockout_time: str = "5m"
     fips_mode: str = "OFF"
     last_program_file: str = ""
+    last_project_file: str = ""
     firmware_urls: dict[str, FirmwareSource] = field(default_factory=dict)
     firmware_server: str = ""
     discovery_timeout: int = 5

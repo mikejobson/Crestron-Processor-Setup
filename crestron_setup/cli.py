@@ -311,6 +311,7 @@ def main() -> None:
             questionary.Choice("Setup Device (manual IP)", value="setup"),
             questionary.Choice("Batch Provision (CSV/YAML)", value="batch"),
             questionary.Choice("Upload Program", value="program"),
+            questionary.Choice("Deploy Project (UC Engine)", value="project"),
             questionary.Choice("Firmware Audit", value="fw_audit"),
             questionary.Choice("Certificate Management", value="certs"),
             questionary.Choice("IP Table Management", value="iptable"),
@@ -341,6 +342,8 @@ def main() -> None:
             config = _flow_batch_provision(config)
         elif choice == "program":
             config = _flow_upload_program(config)
+        elif choice == "project":
+            config = _flow_deploy_project(config)
         elif choice == "restore":
             _flow_restore(config)
         elif choice == "fw_audit":
@@ -397,6 +400,7 @@ def _flow_discover(config: Config) -> Config:
             questionary.Choice("IP Table", value="iptable"),
             questionary.Choice("Account Management", value="accounts"),
             questionary.Choice("Upload Program", value="program"),
+            questionary.Choice("Deploy Project (UC Engine)", value="project"),
             questionary.Choice("Restore & Erase", value="restore"),
             questionary.Choice("Back to Main Menu", value="back"),
         ],
@@ -444,6 +448,7 @@ def _flow_discover(config: Config) -> Config:
 
     # Gather action-specific inputs before starting parallel execution
     program_path: str = ""
+    project_path: str = ""
     slot: int = 1
 
     if action in ("provision", "dry_run"):
@@ -516,6 +521,24 @@ def _flow_discover(config: Config) -> Config:
             return config
 
         config.last_program_file = program_path
+        save_config(config)
+
+    elif action == "project":
+        default_path = config.last_project_file or ""
+        project_path = questionary.path(
+            "CH5Z project file path:",
+            default=default_path,
+        ).ask()
+        if not project_path:
+            return config
+
+        from pathlib import Path as _Path
+        if not _Path(project_path).expanduser().exists():
+            console.print("[red]File not found.[/red]")
+            _pause()
+            return config
+
+        config.last_project_file = project_path
         save_config(config)
 
     elif action == "restore":
@@ -598,11 +621,15 @@ def _flow_discover(config: Config) -> Config:
         elif action == "program":
             host = dev.ip or dev.hostname
             upload_program(host, username, password, program_path, slot, console, use_key_auth=config.ssh_key_auth)
+        elif action == "project":
+            host = dev.ip or dev.hostname
+            _deploy_project_single(host, username, password, project_path, console)
         elif action == "restore":
             restore_device(dev, username, password, console, use_key_auth=config.ssh_key_auth)
         elif action == "iptable":
             _flow_ip_table(config, host=dev.ip or dev.hostname,
-                           username=username, password=password)
+                           username=username, password=password,
+                           model=dev.model)
             return config
         elif action == "accounts":
             _flow_account_mgmt(config, host=dev.ip or dev.hostname,
@@ -615,7 +642,7 @@ def _flow_discover(config: Config) -> Config:
     device_results = _run_parallel(
         action, selected_devices, username, password,
         config, program_path, slot, profile_name=profile_name,
-        device_profiles=device_profiles,
+        device_profiles=device_profiles, project_path=project_path,
     )
     _show_parallel_summary(device_results, config)
     return config
@@ -636,6 +663,7 @@ def _run_parallel(
     slot: int = 1,
     profile_name: str | None = None,
     device_profiles: dict[int, str | None] | None = None,
+    project_path: str = "",
 ) -> list[DeviceResult]:
     """Run an action on multiple devices in parallel with a combined live display."""
     # Pre-create DeviceResult entries with placeholder trackers for display
@@ -655,6 +683,8 @@ def _run_parallel(
         elif action == "program":
             from .provisioning import PROGRAM_PHASE_NAMES
             tracker = _StepTracker(label, list(PROGRAM_PHASE_NAMES))
+        elif action == "project":
+            tracker = _StepTracker(label, ["Upload", "Deploy"])
         else:  # restore
             from .provisioning import RESTORE_PHASE_NAMES
             tracker = _StepTracker(label, list(RESTORE_PHASE_NAMES))
@@ -693,6 +723,10 @@ def _run_parallel(
                 use_key_auth=config.ssh_key_auth,
             )
             dr.success = result[0]  # type: ignore[index]
+        elif action == "project":
+            dr.success = _deploy_project_worker(
+                host, username, password, project_path, dr.tracker,
+            )
         elif action == "restore":
             result = restore_device(
                 dev, username, password, console,
@@ -1120,6 +1154,148 @@ def _flow_upload_program(config: Config) -> Config:
     save_config(config)
 
     upload_program(host, username, password, program_path, slot, console, use_key_auth=config.ssh_key_auth)
+    _pause()
+    return config
+
+
+# --------------------------------------------------------------------------- #
+#  Deploy Project (UC Engine) flow
+# --------------------------------------------------------------------------- #
+
+
+def _is_uc_engine(model: str) -> bool:
+    """Check if a model string indicates a UC Engine device."""
+    upper = model.upper()
+    return upper.startswith("UC-") or upper == "UC-ENGINE"
+
+
+def _deploy_project_single(
+    host: str,
+    username: str,
+    password: str,
+    project_path: str,
+    con: Console,
+) -> None:
+    """Deploy a CH5Z project to a single UC Engine with progress display."""
+    from pathlib import Path as _Path
+    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
+
+    from .ctp import CrestronCTP
+
+    local = _Path(project_path).expanduser()
+    file_size = local.stat().st_size
+
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total} bytes"),
+            console=con,
+        ) as progress:
+            task_id = progress.add_task(
+                f"Connecting to {host}…", total=file_size, completed=0,
+            )
+            ctp = CrestronCTP(host, username, password)
+            ctp.connect()
+            progress.update(task_id, description=f"Uploading {local.name}…")
+
+            def _progress_cb(sent: int, total: int) -> None:
+                progress.update(task_id, completed=sent)
+
+            ctp.upload_project(local, progress_callback=_progress_cb)
+            progress.update(task_id, completed=file_size)
+
+        ctp.disconnect()
+        con.print(f"[green][OK][/green] Project deployed to {host}")
+
+    except Exception as e:
+        con.print(f"[red][FAIL][/red] Deploy to {host} failed: {e}")
+
+
+def _deploy_project_worker(
+    host: str,
+    username: str,
+    password: str,
+    project_path: str,
+    tracker: _StepTracker,
+) -> bool:
+    """Deploy a CH5Z project in headless mode (for parallel execution)."""
+    from pathlib import Path as _Path
+
+    from .ctp import CrestronCTP
+
+    local = _Path(project_path).expanduser()
+
+    try:
+        tracker.start("Upload")
+        ctp = CrestronCTP(host, username, password)
+        ctp.connect()
+
+        def _progress_cb(sent: int, total: int) -> None:
+            pct = int(100 * sent / total) if total else 0
+            tracker.update(f"Upload ({pct}%)")
+
+        ctp.upload_project(local, progress_callback=_progress_cb)
+        tracker.ok("Upload")
+        ctp.disconnect()
+        return True
+
+    except Exception as e:
+        tracker.fail(str(e))
+        return False
+
+
+def _flow_deploy_project(config: Config) -> Config:
+    """Deploy a CH5Z project file to one or more UC Engines."""
+    _header("Deploy Project (UC Engine)")
+
+    console.print(
+        "[cyan][INFO][/cyan] Deploys a CH5Z project to UC Engine devices "
+        "via CTP/TLS (port 41797).\n"
+    )
+
+    # Target devices — comma-separated IPs or hostnames
+    hosts_input = questionary.text(
+        "UC Engine hostname(s) or IP(s) (comma-separated):"
+    ).ask()
+    if not hosts_input:
+        return config
+    hosts = [h.strip() for h in hosts_input.split(",") if h.strip()]
+
+    creds = _prompt_credentials(config)
+    if not creds:
+        return config
+    username, password = creds
+
+    default_path = config.last_project_file or ""
+    project_path = questionary.path(
+        "CH5Z project file path:",
+        default=default_path,
+    ).ask()
+    if not project_path:
+        return config
+
+    from pathlib import Path as _Path
+    if not _Path(project_path).expanduser().exists():
+        console.print("[red]File not found.[/red]")
+        _pause()
+        return config
+
+    config.last_project_file = project_path
+    save_config(config)
+
+    if len(hosts) == 1:
+        _deploy_project_single(hosts[0], username, password, project_path, console)
+    else:
+        # Parallel deployment
+        devices = [Device(ip=h) for h in hosts]
+        device_results = _run_parallel(
+            "project", devices, username, password, config,
+            project_path=project_path,
+        )
+        _show_parallel_summary(device_results, config)
+
     _pause()
     return config
 
@@ -2239,6 +2415,13 @@ def _flow_bulk_deploy_cert(
 #  IP Table Management flow
 # --------------------------------------------------------------------------- #
 
+# Type alias for console connections — CrestronSSH and CrestronCTP share
+# the same send_command() / disconnect() API.
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .ctp import CrestronCTP
+    _ConsoleConn = CrestronSSH | CrestronCTP
+
 
 @dataclass
 class _IPTableEntry:
@@ -2255,37 +2438,88 @@ class _IPTableEntry:
 
 
 def _parse_ipt_output(raw: str) -> list[_IPTableEntry]:
-    """Parse pipe-delimited output from IPT -T into structured entries."""
+    """Parse IPT -T output into structured entries.
+
+    Handles two formats:
+    - **Pipe-delimited** (processors): columns separated by ``|``
+    - **Whitespace-delimited** (UC Engines): fixed-width columns with no ``|``
+
+    The UC Engine format looks like::
+
+        CIP_ID  Type   Status     DevID  Port   IP Address/SiteName     RoomID
+            04  Gway    ONLINE        00  41794  10.100.203.139             (null)
+    """
     entries: list[_IPTableEntry] = []
     lines = raw.splitlines()
-    in_data = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("---"):
-            in_data = True
-            continue
-        if not in_data:
-            continue
-        if not stripped or "|" not in stripped:
-            continue
-        parts = [p.strip() for p in stripped.split("|")]
-        if len(parts) < 6:
-            continue
-        try:
-            cip_id = int(parts[0])
-        except (ValueError, IndexError):
-            continue
-        entries.append(_IPTableEntry(
-            cip_id=cip_id,
-            entry_type=parts[1] if len(parts) > 1 else "",
-            status=parts[2] if len(parts) > 2 else "",
-            dev_id=parts[3] if len(parts) > 3 else "",
-            port=parts[4] if len(parts) > 4 else "",
-            address=parts[5] if len(parts) > 5 else "",
-            model=parts[6] if len(parts) > 6 else "",
-            description=parts[7] if len(parts) > 7 else "",
-            room_id=parts[8] if len(parts) > 8 else "",
-        ))
+
+    # Detect format: if any data-like line contains "|", use pipe parsing
+    use_pipe = any("|" in ln and not ln.strip().startswith("---") for ln in lines)
+
+    if use_pipe:
+        in_data = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("---"):
+                in_data = True
+                continue
+            if not in_data:
+                continue
+            if not stripped or "|" not in stripped:
+                continue
+            parts = [p.strip() for p in stripped.split("|")]
+            if len(parts) < 6:
+                continue
+            try:
+                cip_id = int(parts[0])
+            except (ValueError, IndexError):
+                continue
+            entries.append(_IPTableEntry(
+                cip_id=cip_id,
+                entry_type=parts[1] if len(parts) > 1 else "",
+                status=parts[2] if len(parts) > 2 else "",
+                dev_id=parts[3] if len(parts) > 3 else "",
+                port=parts[4] if len(parts) > 4 else "",
+                address=parts[5] if len(parts) > 5 else "",
+                model=parts[6] if len(parts) > 6 else "",
+                description=parts[7] if len(parts) > 7 else "",
+                room_id=parts[8] if len(parts) > 8 else "",
+            ))
+    else:
+        # Whitespace-delimited (UC Engine format)
+        header_seen = False
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.upper().startswith("CIP_ID"):
+                header_seen = True
+                continue
+            if not header_seen:
+                # Skip preamble lines like "IP Table:"
+                continue
+            parts = stripped.split()
+            if len(parts) < 6:
+                continue
+            try:
+                cip_id = int(parts[0])
+            except (ValueError, IndexError):
+                continue
+            # Rejoin remaining fields after the first 6 as room_id
+            # Format: CIP_ID Type Status DevID Port Address [RoomID...]
+            room_id = " ".join(parts[6:]) if len(parts) > 6 else ""
+            if room_id == "(null)":
+                room_id = ""
+            entries.append(_IPTableEntry(
+                cip_id=cip_id,
+                entry_type=parts[1],
+                status=parts[2],
+                dev_id=parts[3],
+                port=parts[4],
+                address=parts[5],
+                model="",
+                description="",
+                room_id=room_id,
+            ))
     return entries
 
 
@@ -2333,14 +2567,14 @@ def _display_ip_table(entries: list[_IPTableEntry], title: str = "IP Table") -> 
     )
 
 
-def _ip_table_view(ssh: "CrestronSSH") -> None:
+def _ip_table_view(ssh: "_ConsoleConn") -> None:
     """Read and display the full IP table."""
     raw = ssh.send_command("IPT -T", timeout=15)
     entries = _parse_ipt_output(raw)
     _display_ip_table(entries)
 
 
-def _ip_table_add_master(ssh: "CrestronSSH") -> None:
+def _ip_table_add_master(ssh: "_ConsoleConn") -> None:
     """Add a master entry to the IP table."""
     cip_id = questionary.text("CIP ID (e.g. 3):").ask()
     if not cip_id:
@@ -2365,7 +2599,7 @@ def _ip_table_add_master(ssh: "CrestronSSH") -> None:
     _ip_table_view(ssh)
 
 
-def _ip_table_remove_master(ssh: "CrestronSSH") -> None:
+def _ip_table_remove_master(ssh: "_ConsoleConn") -> None:
     """Remove master entries from the IP table."""
     raw = ssh.send_command("IPT -T", timeout=15)
     entries = _parse_ipt_output(raw)
@@ -2400,7 +2634,7 @@ def _ip_table_remove_master(ssh: "CrestronSSH") -> None:
     _ip_table_view(ssh)
 
 
-def _ip_table_add_peer(ssh: "CrestronSSH") -> None:
+def _ip_table_add_peer(ssh: "_ConsoleConn") -> None:
     """Add a peer entry to the IP table."""
     cip_id = questionary.text("CIP ID (e.g. 3):").ask()
     if not cip_id:
@@ -2425,7 +2659,7 @@ def _ip_table_add_peer(ssh: "CrestronSSH") -> None:
     _ip_table_view(ssh)
 
 
-def _ip_table_remove_peer(ssh: "CrestronSSH") -> None:
+def _ip_table_remove_peer(ssh: "_ConsoleConn") -> None:
     """Remove peer entries from the IP table."""
     raw = ssh.send_command("IPT -T", timeout=15)
     entries = _parse_ipt_output(raw)
@@ -2460,7 +2694,7 @@ def _ip_table_remove_peer(ssh: "CrestronSSH") -> None:
     _ip_table_view(ssh)
 
 
-def _ip_table_clear(ssh: "CrestronSSH") -> None:
+def _ip_table_clear(ssh: "_ConsoleConn") -> None:
     """Clear the IP table."""
     program = questionary.text(
         "Program number to clear (leave blank for all):",
@@ -2486,8 +2720,13 @@ def _ip_table_clear(ssh: "CrestronSSH") -> None:
 
 def _flow_ip_table(config: Config, host: str | None = None,
                    username: str | None = None,
-                   password: str | None = None) -> Config:
-    """IP Table Management submenu with persistent SSH connection."""
+                   password: str | None = None,
+                   model: str | None = None) -> Config:
+    """IP Table Management submenu with persistent SSH or CTP connection.
+
+    Automatically uses CTP/TLS for UC Engine devices (UC-* models) since
+    they don't expose SSH.
+    """
     from .ssh import CrestronSSH
 
     _header("IP Table Management")
@@ -2503,20 +2742,38 @@ def _flow_ip_table(config: Config, host: str | None = None,
             return config
         username, password = creds
 
+    # Determine transport: CTP for UC Engines, SSH for everything else
+    use_ctp = model and _is_uc_engine(model)
+    if not use_ctp and model is None:
+        # No model hint — ask the user
+        transport = questionary.select(
+            "Connection type:",
+            choices=[
+                questionary.Choice("SSH (processors, touchpanels)", value="ssh"),
+                questionary.Choice("CTP/TLS (UC Engines)", value="ctp"),
+            ],
+        ).ask()
+        use_ctp = transport == "ctp"
+
     # Connect once, keep alive for the session
     try:
-        ssh = CrestronSSH(host, username, password, use_key_auth=config.ssh_key_auth)
-        ssh.connect()
+        if use_ctp:
+            from .ctp import CrestronCTP
+            conn = CrestronCTP(host, username, password)
+            conn.connect()
+        else:
+            conn = CrestronSSH(host, username, password, use_key_auth=config.ssh_key_auth)
+            conn.connect()
     except Exception as e:
         console.print(f"[red][FAIL][/red] Connection failed: {e}")
         _pause()
         return config
 
-    console.print(f"[green][OK][/green] Connected to {host} ({ssh.model})\n")
+    console.print(f"[green][OK][/green] Connected to {host} ({conn.model})\n")
 
     try:
         while True:
-            _header(f"IP Table — {host} ({ssh.model})")
+            _header(f"IP Table — {host} ({conn.model})")
             choice = questionary.select(
                 f"IP Table — {host}",
                 choices=[
@@ -2535,24 +2792,24 @@ def _flow_ip_table(config: Config, host: str | None = None,
 
             try:
                 if choice == "view":
-                    _ip_table_view(ssh)
+                    _ip_table_view(conn)
                 elif choice == "add_master":
-                    _ip_table_add_master(ssh)
+                    _ip_table_add_master(conn)
                 elif choice == "rem_master":
-                    _ip_table_remove_master(ssh)
+                    _ip_table_remove_master(conn)
                 elif choice == "add_peer":
-                    _ip_table_add_peer(ssh)
+                    _ip_table_add_peer(conn)
                 elif choice == "rem_peer":
-                    _ip_table_remove_peer(ssh)
+                    _ip_table_remove_peer(conn)
                 elif choice == "clear":
-                    _ip_table_clear(ssh)
+                    _ip_table_clear(conn)
             except Exception as e:
                 console.print(f"[red][FAIL][/red] {e}")
 
             _pause()
     finally:
         try:
-            ssh.disconnect()
+            conn.disconnect()
         except Exception:
             pass
 
