@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import glob as _glob_module
 import os
 import select
 import sys
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from pathlib import Path as _Path
 from dataclasses import dataclass
 
 try:
@@ -532,7 +534,6 @@ def _flow_discover(config: Config) -> Config:
         if not project_path:
             return config
 
-        from pathlib import Path as _Path
         if not _Path(project_path).expanduser().exists():
             console.print("[red]File not found.[/red]")
             _pause()
@@ -1109,6 +1110,35 @@ def _run_parallel_batch(
 
 
 # --------------------------------------------------------------------------- #
+#  Glob path resolution helper
+# --------------------------------------------------------------------------- #
+
+
+def _resolve_glob_path(path: str, console: Console) -> str | None:
+    """Resolve a path that may contain glob wildcards to the latest matching file.
+
+    If *path* contains no glob characters it is returned unchanged. When it
+    does contain wildcards the pattern is expanded and the most recently
+    modified matching file is returned. Returns ``None`` when the pattern
+    matches nothing.
+    """
+    if not any(c in path for c in ("*", "?", "[")):
+        return path
+    expanded = str(_Path(path).expanduser())
+    matches = sorted(
+        (p for p in _glob_module.glob(expanded) if _Path(p).is_file()),
+        key=lambda p: _Path(p).stat().st_mtime,
+        reverse=True,
+    )
+    if not matches:
+        console.print(f"[red]No files match pattern: {path}[/red]")
+        return None
+    resolved = matches[0]
+    console.print(f"[dim]Glob resolved → {resolved}[/dim]")
+    return resolved
+
+
+# --------------------------------------------------------------------------- #
 #  Upload Program flow
 # --------------------------------------------------------------------------- #
 
@@ -1117,19 +1147,20 @@ def _flow_upload_program(config: Config) -> Config:
     """Upload a program file to a processor and load it."""
     _header("Upload Program")
 
-    host = questionary.text("Processor hostname or IP:").ask()
-    if not host:
+    hosts_input = questionary.text(
+        "Processor hostname(s) or IP(s) (comma-separated):"
+    ).ask()
+    if not hosts_input:
         return config
+    hosts = [h.strip() for h in hosts_input.split(",") if h.strip()]
 
-    username = questionary.text("Admin username:").ask()
-    if not username:
+    creds = _prompt_credentials(config)
+    if not creds:
         return config
-
-    password = questionary.password("Admin password:").ask()
-    if not password:
-        return config
+    username, password = creds
 
     default_path = config.last_program_file or ""
+    console.print("[dim]Tip: you can use a glob pattern (e.g. ~/builds/MyApp_*.lpz) to always pick the latest matching file.[/dim]")
     program_path = questionary.path(
         "Program file path:",
         default=default_path,
@@ -1149,12 +1180,25 @@ def _flow_upload_program(config: Config) -> Config:
         _pause()
         return config
 
-    # Remember the program file for next time
+    # Remember the program file (or glob pattern) for next time
     config.last_program_file = program_path
     save_config(config)
 
-    upload_program(host, username, password, program_path, slot, console, use_key_auth=config.ssh_key_auth)
-    _pause()
+    resolved_path = _resolve_glob_path(program_path, console)
+    if not resolved_path:
+        _pause()
+        return config
+
+    if len(hosts) == 1:
+        upload_program(hosts[0], username, password, resolved_path, slot, console, use_key_auth=config.ssh_key_auth)
+        _pause()
+    else:
+        devices = [Device(ip=h) for h in hosts]
+        device_results = _run_parallel(
+            "program", devices, username, password, config,
+            program_path=resolved_path, slot=slot,
+        )
+        _show_parallel_summary(device_results, config)
     return config
 
 
@@ -1177,7 +1221,6 @@ def _deploy_project_single(
     con: Console,
 ) -> None:
     """Deploy a CH5Z project to a single UC Engine with progress display."""
-    from pathlib import Path as _Path
     from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
 
     from .ctp import CrestronCTP
@@ -1269,6 +1312,7 @@ def _flow_deploy_project(config: Config) -> Config:
     username, password = creds
 
     default_path = config.last_project_file or ""
+    console.print("[dim]Tip: you can use a glob pattern (e.g. ~/builds/MyApp_*.ch5z) to always pick the latest matching file.[/dim]")
     project_path = questionary.path(
         "CH5Z project file path:",
         default=default_path,
@@ -1276,23 +1320,28 @@ def _flow_deploy_project(config: Config) -> Config:
     if not project_path:
         return config
 
-    from pathlib import Path as _Path
-    if not _Path(project_path).expanduser().exists():
+    # Remember the project file (or glob pattern) for next time
+    config.last_project_file = project_path
+    save_config(config)
+
+    resolved_project = _resolve_glob_path(project_path, console)
+    if not resolved_project:
+        _pause()
+        return config
+
+    if not _Path(resolved_project).expanduser().is_file():
         console.print("[red]File not found.[/red]")
         _pause()
         return config
 
-    config.last_project_file = project_path
-    save_config(config)
-
     if len(hosts) == 1:
-        _deploy_project_single(hosts[0], username, password, project_path, console)
+        _deploy_project_single(hosts[0], username, password, resolved_project, console)
     else:
         # Parallel deployment
         devices = [Device(ip=h) for h in hosts]
         device_results = _run_parallel(
             "project", devices, username, password, config,
-            project_path=project_path,
+            project_path=resolved_project,
         )
         _show_parallel_summary(device_results, config)
 
