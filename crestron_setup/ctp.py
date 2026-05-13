@@ -5,21 +5,24 @@ access and file transfers.  This module provides ``CrestronCTP``, which mirrors
 the ``CrestronSSH`` API (connect / send_command / disconnect) so it can be used
 as a drop-in replacement for IP table management and other console operations.
 
-File uploads use the XMODEM-1K CRC protocol triggered by the ``XPUTFILE``
-command.  Project deployment uploads the inner CH5 file from a CH5Z archive
-and activates it with ``SELECTPROJECT``.
+File uploads use the XMODEM-1K CRC protocol.  Individual files are sent via
+``XPUTFILE``; CH5Z project deployment uses ``GETCH5DISPLAY``, which triggers
+the device's built-in extraction pipeline (CH5Z → CH5 → web files).
+
+Protocol notes (reverse-engineered via TLS MITM of Crestron Toolbox):
+- Binary handshake ``\\xfe\\xaa\\x01\\x0d`` must be sent before login
+- All commands use ``\\r`` line endings (NOT ``\\r\\n``)
+- ``echo off`` should be sent before file transfers
+- ``GETCH5DISPLAY`` is the correct (undocumented) command for CH5Z uploads
 """
 
 from __future__ import annotations
 
-import io
-import os
 import re
 import socket
 import ssl
 import struct
 import time
-import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -91,6 +94,9 @@ class CrestronCTP:
     def connect(self, timeout: int = CONNECT_TIMEOUT) -> str:
         """Connect over TLS, authenticate, and detect the device model.
 
+        Sends the CTP binary handshake (``\\xfe\\xaa\\x01\\x0d``) before
+        login.  All prompts use ``\\r``-only line endings.
+
         Returns the model string (e.g. ``'UC-ENGINE'``).
         """
         ctx = ssl.create_default_context()
@@ -102,16 +108,16 @@ class CrestronCTP:
         raw.connect((self.host, self.port))
         self._sock = ctx.wrap_socket(raw, server_hostname=self.host)
 
-        # Wake the console and wait for Login: prompt
-        self._send(b"\r\n")
+        # CTP binary handshake — required before login
+        self._send(b"\xfe\xaa\x01\x0d")
         self._read_until([b"Login:"], timeout=10)
 
-        # Send username
-        self._send(self.username.encode() + b"\r\n")
+        # Send username (\r only, no \n)
+        self._send(self.username.encode() + b"\r")
         self._read_until([b"Password:"], timeout=10)
 
         # Send password
-        self._send(self.password.encode() + b"\r\n")
+        self._send(self.password.encode() + b"\r")
         buf = self._read_until_prompt(timeout=15)
 
         m = PROMPT_RE.search(buf)
@@ -135,7 +141,7 @@ class CrestronCTP:
         if label and self.console:
             self.console.print(f"  --- {label} ---")
 
-        self._send(command.encode() + b"\r\n")
+        self._send(command.encode() + b"\r")
         raw = self._read_until_prompt(timeout=timeout)
 
         text = raw.decode("ascii", errors="ignore")
@@ -156,7 +162,7 @@ class CrestronCTP:
         """Send BYE and close the TLS connection."""
         if self._sock:
             try:
-                self._send(b"BYE\r\n")
+                self._send(b"BYE\r")
                 time.sleep(0.5)
             except Exception:
                 pass
@@ -208,7 +214,7 @@ class CrestronCTP:
             self.send_command(f"CD {remote_dir}")
 
         # Send XPUT command
-        xput_cmd = f"XPUT {file_size} {date_str} {time_str} {remote_name}\r\n"
+        xput_cmd = f"XPUT {file_size} {date_str} {time_str} {remote_name}\r"
         self._send(xput_cmd.encode())
 
         # Wait for 'C' — XMODEM-CRC ready signal
@@ -227,9 +233,17 @@ class CrestronCTP:
     ) -> bool:
         """Upload a CH5Z project and deploy it on the UC Engine.
 
-        Extracts the inner CH5 file from the CH5Z archive, clears the display
-        directory with ``INITIALIZE``, uploads the CH5 via ``XPUTFILE``, and
-        activates it with ``SELECTPROJECT``.
+        Uses ``GETCH5DISPLAY`` to upload the raw CH5Z file.  The device
+        handles extraction automatically (CH5Z → CH5 → web files into
+        ``\\Display``).
+
+        Replicates the exact Toolbox upload sequence:
+        1. ``echo off`` — disable command echo before transfer
+        2. Pre-flight checks (``isdir``, ``projectworkingpath``)
+        3. ``message Loading project...`` — show status on device screen
+        4. ``GETCH5DISPLAY`` — trigger XMODEM receive for CH5Z
+        5. ``message`` — clear on-screen status after transfer
+        6. ``echo on`` — re-enable command echo
         """
         if not self._sock:
             raise RuntimeError("Not connected")
@@ -238,40 +252,38 @@ class CrestronCTP:
         if not local.exists():
             raise FileNotFoundError(f"Local file not found: {local}")
 
-        # Extract inner CH5 from the CH5Z archive
-        with zipfile.ZipFile(local) as zf:
-            ch5_names = [n for n in zf.namelist() if n.lower().endswith(".ch5")]
-            if not ch5_names:
-                raise RuntimeError("No .ch5 file found inside CH5Z archive")
-            ch5_name = ch5_names[0]
-            ch5_data = zf.read(ch5_name)
+        file_data = local.read_bytes()
+        file_size = len(file_data)
 
-        # Clear existing project
-        self._send(b"INITIALIZE\r\n")
-        buf = self._read_until([b"Y or N"], timeout=15)
-        self._send(b"Y\r\n")
-        self._read_until_prompt(timeout=30)
+        # Disable echo before file transfer (Toolbox does this)
+        self.send_command("echo off")
 
-        # Upload the CH5 file via XPUTFILE
-        self.send_command("CD \\Display")
-        file_size = len(ch5_data)
-        now = datetime.now()
-        xput_cmd = (
-            f"XPUT {file_size} {now.strftime('%m-%d-%y')} "
-            f"{now.strftime('%H:%M:%S')} {ch5_name}\r\n"
-        )
-        self._send(xput_cmd.encode())
+        # Pre-flight checks
+        self.send_command("isdir \\DISPLAY")
+        self.send_command("projectworkingpath")
+
+        # Show loading message on device screen
+        self.send_command("message Loading project...")
+
+        # Trigger CH5Z upload via GETCH5DISPLAY
+        self._send(b"GETCH5DISPLAY\r")
 
         if not self._wait_for_xmodem_start(timeout=20):
-            raise RuntimeError("Device did not enter XMODEM receive mode")
+            # Re-enable echo on failure
+            self.send_command("echo on")
+            raise RuntimeError(
+                "Device did not enter XMODEM receive mode for GETCH5DISPLAY"
+            )
 
-        self._xmodem_send_data(ch5_data, file_size, progress_callback)
-        self._read_until_prompt(timeout=15)
+        self._xmodem_send_data(file_data, file_size, progress_callback)
 
-        # Activate the project
-        resp = self.send_command(
-            f"SELECTPROJECT \\Display\\{ch5_name}", timeout=60,
-        )
+        # Wait for EOT ACK, then "Transfer successful" + prompt
+        self._read_until_prompt(timeout=60)
+
+        # Clear on-screen message and re-enable echo
+        self.send_command("message")
+        self.send_command("echo on")
+
         return True
 
     def _xmodem_send_data(
@@ -292,7 +304,7 @@ class CrestronCTP:
         while offset < len(file_data):
             chunk = file_data[offset:offset + _XMODEM_BLOCK_SIZE]
             if len(chunk) < _XMODEM_BLOCK_SIZE:
-                chunk += b"\x00" * (_XMODEM_BLOCK_SIZE - len(chunk))
+                chunk += bytes([_SUB]) * (_XMODEM_BLOCK_SIZE - len(chunk))
 
             crc = _crc16_xmodem(chunk)
             seq = block_num & 0xFF
@@ -326,7 +338,13 @@ class CrestronCTP:
                         f"XMODEM transfer failed: unexpected response 0x{resp:02x}"
                     )
 
+        # End of transmission — wait for ACK
         self._sock.send(bytes([_EOT]))
+        resp = self._recv_byte(timeout=10)
+        if resp != _ACK:
+            raise RuntimeError(
+                f"XMODEM: device did not ACK EOT (got 0x{resp:02x})"
+            )
 
     # ------------------------------------------------------------------ #
     #  Low-level I/O helpers
@@ -410,15 +428,14 @@ class CrestronCTP:
     def _wait_for_xmodem_start(self, timeout: int = 15) -> bool:
         """Wait for the receiver to send ``C`` (CRC mode ready).
 
-        The device echoes the XPUTFILE command before sending the bare ``C``
-        byte.  We wait for the echo to finish (``\\r\\n\\r\\n``) before
-        matching to avoid false positives from filenames containing 'C'.
+        When echo is *on* the device echoes the command before sending
+        ``C``.  When echo is *off* (the normal case for file transfers),
+        the ``C`` arrives with minimal preamble.  We handle both.
         """
         if not self._sock:
             return False
         deadline = time.time() + timeout
         buf = b""
-        echo_done = False
         while time.time() < deadline:
             remaining = max(0.5, deadline - time.time())
             self._sock.settimeout(remaining)
@@ -427,9 +444,8 @@ class CrestronCTP:
                 if not chunk:
                     break
                 buf += chunk
-                if b"\r\n\r\n" in buf:
-                    echo_done = True
-                if echo_done and b"C" in buf.split(b"\r\n\r\n", 1)[-1]:
+                # After any echo/preamble, look for bare 'C'
+                if b"C" in buf:
                     return True
             except (socket.timeout, ssl.SSLError):
                 break
