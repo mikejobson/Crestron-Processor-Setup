@@ -5,19 +5,21 @@ access and file transfers.  This module provides ``CrestronCTP``, which mirrors
 the ``CrestronSSH`` API (connect / send_command / disconnect) so it can be used
 as a drop-in replacement for IP table management and other console operations.
 
-File uploads use the XMODEM-1K CRC protocol.  General file transfers are
-triggered by ``XPUTFILE``, while project deployment uses ``PUTDISPLAY`` which
-combines XMODEM upload with automatic extraction and activation.
+File uploads use the XMODEM-1K CRC protocol triggered by the ``XPUTFILE``
+command.  Project deployment uploads the inner CH5 file from a CH5Z archive
+and activates it with ``SELECTPROJECT``.
 """
 
 from __future__ import annotations
 
+import io
 import os
 import re
 import socket
 import ssl
 import struct
 import time
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -61,47 +63,6 @@ def _crc16_xmodem(data: bytes) -> int:
             crc &= 0xFFFF
     return crc
 
-
-def _pad_zip_to_block_boundary(data: bytes, block_size: int = 1024) -> bytes:
-    """Pad a ZIP archive to a *block_size* boundary using the ZIP comment.
-
-    XMODEM transfers are block-aligned — any partial last block must be
-    padded.  Standard XMODEM padding (``SUB`` or null bytes) appended after
-    the ZIP's End-of-Central-Directory corrupts the archive because the
-    receiver has no way to know the original file size.
-
-    Instead we extend the ZIP *before* transfer by writing null bytes into
-    the EOCD comment field (which ZIP readers ignore), making the archive
-    an exact multiple of *block_size*.  The transferred file is then a
-    valid ZIP with no XMODEM padding needed.
-
-    Returns the (possibly extended) data unchanged if already aligned or
-    if the EOCD cannot be located.
-    """
-    remainder = len(data) % block_size
-    if remainder == 0:
-        return data
-
-    pad_needed = block_size - remainder
-    eocd_sig = b"\x50\x4b\x05\x06"
-    eocd_pos = data.rfind(eocd_sig)
-    if eocd_pos == -1:
-        return data  # Not a ZIP — caller can decide what to do
-
-    # Comment-length field is at EOCD + 20 (2 bytes, little-endian)
-    comment_len_offset = eocd_pos + 20
-    if comment_len_offset + 2 > len(data):
-        return data
-
-    current_comment_len = struct.unpack_from("<H", data, comment_len_offset)[0]
-    new_comment_len = current_comment_len + pad_needed
-    if new_comment_len > 0xFFFF:
-        return data  # Can't fit — shouldn't happen for reasonable padding
-
-    buf = bytearray(data)
-    struct.pack_into("<H", buf, comment_len_offset, new_comment_len)
-    buf += b"\x00" * pad_needed
-    return bytes(buf)
 
 
 class CrestronCTP:
@@ -266,15 +227,9 @@ class CrestronCTP:
     ) -> bool:
         """Upload a CH5Z project and deploy it on the UC Engine.
 
-        Uses the ``PUTDISPLAY`` command which combines XMODEM upload with
-        automatic project extraction and activation — this is the same
-        mechanism Crestron Toolbox uses.  The device shows "Loading Project"
-        during transfer and "Extracting Project" once complete.
-
-        The CH5Z (ZIP archive) is padded to a 1024-byte boundary using the
-        ZIP comment field so that XMODEM block padding doesn't corrupt the
-        archive.  This is critical — the device receives raw XMODEM data
-        with no separate file-size metadata.
+        Extracts the inner CH5 file from the CH5Z archive, clears the display
+        directory with ``INITIALIZE``, uploads the CH5 via ``XPUTFILE``, and
+        activates it with ``SELECTPROJECT``.
         """
         if not self._sock:
             raise RuntimeError("Not connected")
@@ -283,23 +238,40 @@ class CrestronCTP:
         if not local.exists():
             raise FileNotFoundError(f"Local file not found: {local}")
 
-        # Pad the ZIP to a 1024-byte boundary so XMODEM doesn't corrupt it
-        raw_data = local.read_bytes()
-        file_data = _pad_zip_to_block_boundary(raw_data)
+        # Extract inner CH5 from the CH5Z archive
+        with zipfile.ZipFile(local) as zf:
+            ch5_names = [n for n in zf.namelist() if n.lower().endswith(".ch5")]
+            if not ch5_names:
+                raise RuntimeError("No .ch5 file found inside CH5Z archive")
+            ch5_name = ch5_names[0]
+            ch5_data = zf.read(ch5_name)
 
-        # PUTDISPLAY takes no arguments — just triggers XMODEM receive
-        self._send(b"PUTDISPLAY\r\n")
+        # Clear existing project
+        self._send(b"INITIALIZE\r\n")
+        buf = self._read_until([b"Y or N"], timeout=15)
+        self._send(b"Y\r\n")
+        self._read_until_prompt(timeout=30)
 
-        if not self._wait_for_xmodem_start(timeout=15):
+        # Upload the CH5 file via XPUTFILE
+        self.send_command("CD \\Display")
+        file_size = len(ch5_data)
+        now = datetime.now()
+        xput_cmd = (
+            f"XPUT {file_size} {now.strftime('%m-%d-%y')} "
+            f"{now.strftime('%H:%M:%S')} {ch5_name}\r\n"
+        )
+        self._send(xput_cmd.encode())
+
+        if not self._wait_for_xmodem_start(timeout=20):
             raise RuntimeError("Device did not enter XMODEM receive mode")
 
-        self._xmodem_send_data(file_data, len(raw_data), progress_callback)
+        self._xmodem_send_data(ch5_data, file_size, progress_callback)
+        self._read_until_prompt(timeout=15)
 
-        # PUTDISPLAY responds with "Transfer successful." then a prompt
-        buf = self._read_until_prompt(timeout=60)
-        resp = buf.decode("ascii", errors="ignore")
-        if "transfer successful" not in resp.lower():
-            raise RuntimeError(f"Unexpected PUTDISPLAY response: {resp.strip()}")
+        # Activate the project
+        resp = self.send_command(
+            f"SELECTPROJECT \\Display\\{ch5_name}", timeout=60,
+        )
         return True
 
     def _xmodem_send_data(
@@ -436,16 +408,28 @@ class CrestronCTP:
         return buf
 
     def _wait_for_xmodem_start(self, timeout: int = 15) -> bool:
-        """Wait for the receiver to send ``C`` (CRC mode ready)."""
+        """Wait for the receiver to send ``C`` (CRC mode ready).
+
+        The device echoes the XPUTFILE command before sending the bare ``C``
+        byte.  We wait for the echo to finish (``\\r\\n\\r\\n``) before
+        matching to avoid false positives from filenames containing 'C'.
+        """
         if not self._sock:
             return False
         deadline = time.time() + timeout
+        buf = b""
+        echo_done = False
         while time.time() < deadline:
-            remaining = max(0.1, deadline - time.time())
+            remaining = max(0.5, deadline - time.time())
             self._sock.settimeout(remaining)
             try:
-                b = self._sock.recv(1)
-                if b == b"C":
+                chunk = self._sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                if b"\r\n\r\n" in buf:
+                    echo_done = True
+                if echo_done and b"C" in buf.split(b"\r\n\r\n", 1)[-1]:
                     return True
             except (socket.timeout, ssl.SSLError):
                 break
