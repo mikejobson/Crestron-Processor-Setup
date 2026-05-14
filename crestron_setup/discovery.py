@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import errno
+import platform
 import re
 import socket
+import subprocess
 import time
 
 from rich.console import Console
@@ -16,6 +19,53 @@ from rich.text import Text
 from .models import Config, Device
 
 CIP_PORT = 41794
+
+
+def _get_broadcast_addresses() -> list[str]:
+    """Get broadcast addresses for all active network interfaces."""
+    addresses: list[str] = []
+    try:
+        system = platform.system()
+        if system == "Darwin":
+            output = subprocess.check_output(["ifconfig"], text=True, timeout=5)
+            addresses = re.findall(r"broadcast\s+(\d+\.\d+\.\d+\.\d+)", output)
+        elif system == "Linux":
+            output = subprocess.check_output(
+                ["ip", "-4", "addr", "show"], text=True, timeout=5
+            )
+            addresses = re.findall(r"brd\s+(\d+\.\d+\.\d+\.\d+)", output)
+        elif system == "Windows":
+            # Windows: fall back to global broadcast
+            pass
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        pass
+    # Deduplicate while preserving order
+    return list(dict.fromkeys(addresses))
+
+
+def _send_broadcast(sock: socket.socket, packet: bytes) -> None:
+    """Send a discovery packet to all available broadcast addresses."""
+    sent = False
+    # Send to per-interface broadcast addresses to cover all subnets
+    for target in _get_broadcast_addresses():
+        try:
+            sock.sendto(packet, (target, CIP_PORT))
+            sent = True
+        except OSError:
+            continue
+    # Also try global broadcast (covers Windows and fallback cases)
+    try:
+        sock.sendto(packet, ("255.255.255.255", CIP_PORT))
+        sent = True
+    except OSError as e:
+        if e.errno not in (errno.EADDRNOTAVAIL, errno.ENETUNREACH):
+            raise
+    if not sent:
+        raise OSError(
+            errno.EADDRNOTAVAIL,
+            "No broadcast-capable network interfaces found. "
+            "Check that you are connected to a network.",
+        )
 
 
 def build_discovery_packet() -> bytes:
@@ -118,7 +168,7 @@ def discover_devices(config: Config, console: Console | None = None) -> list[Dev
     if not console:
         # No console — run silently
         for _ in range(repeats):
-            sock.sendto(packet, ("255.255.255.255", CIP_PORT))
+            _send_broadcast(sock, packet)
             time.sleep(0.2)
         start = time.time()
         while time.time() - start < timeout:
@@ -136,7 +186,7 @@ def discover_devices(config: Config, console: Console | None = None) -> list[Dev
     with Live(_discovery_panel(spinner, devices, "Broadcasting…"), console=console, refresh_per_second=10) as live:
         # Send discovery packets
         for i in range(repeats):
-            sock.sendto(packet, ("255.255.255.255", CIP_PORT))
+            _send_broadcast(sock, packet)
             time.sleep(0.2)
 
         # Collect responses
