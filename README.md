@@ -296,6 +296,13 @@ Every pull request runs lint, the test suite on Python 3.10–3.13, and a
 packaging build (`.github/workflows/ci.yml`). Nothing is published from a PR —
 releases are cut by pushing a `v*` tag, which triggers `release.yml`.
 
+`release.yml` can also be re-run manually from the Actions tab
+(**Run workflow**), passing the tag to release. The version is derived from the
+tag by setuptools-scm, so the tag must already exist — a manual run re-drives
+the pipeline for an existing tag (after a transient failure or an expired tap
+token), it does not create a new version. The run fails up front if the tag is
+missing or does not start with `v`.
+
 ## Legacy Bash Script
 
 The original `setup_processor.sh` is still included for reference. It requires macOS with `expect` and takes a single hostname argument:
