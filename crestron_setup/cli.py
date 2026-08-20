@@ -10,6 +10,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path as _Path
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 try:
     import termios
@@ -40,6 +41,16 @@ from .provisioning import (
     upload_program,
 )
 from .ssh import CrestronFirstBoot
+
+if TYPE_CHECKING:
+    # Imported for annotations only — the runtime imports happen inside the
+    # flows that need a connection, to keep startup light.
+    from .ctp import CrestronCTP
+    from .ssh import CrestronSSH
+
+    # Console connections: CrestronSSH and CrestronCTP share the same
+    # send_command() / disconnect() API.
+    _ConsoleConn = CrestronSSH | CrestronCTP
 from .timezones import timezone_choices, timezone_label
 from .updater import (
     InstallMethod,
@@ -1464,7 +1475,6 @@ def _flow_firmware_audit(config: Config) -> None:
 
     from .firmware import (
         _parse_puf_metadata,
-        download_firmware_quiet,
         find_local_firmware,
         query_firmware_server,
         version_compare,
@@ -1721,7 +1731,7 @@ def _flow_firmware_audit(config: Config) -> None:
         ))
     if forceable:
         update_choices.append(questionary.Choice(
-            f"Force firmware on selected devices (including up-to-date)",
+            "Force firmware on selected devices (including up-to-date)",
             value="force",
         ))
     update_choices.append(questionary.Choice("No, just view results", value="skip"))
@@ -2229,7 +2239,7 @@ def _flow_install_cert(config: Config) -> None:
         console.print(f"  Intermediate:  {Path(inter_path).name} → INTERMEDIATE store")
     if root_path and Path(root_path).expanduser().is_file():
         console.print(f"  Root CA:       {Path(root_path).name} → ROOT store")
-    console.print(f"  SSL mode:      CA (activate CA-signed)")
+    console.print("  SSL mode:      CA (activate CA-signed)")
     console.print()
 
     confirm = questionary.confirm("Proceed with installation?").ask()
@@ -2263,7 +2273,7 @@ def _flow_install_cert(config: Config) -> None:
             if root_path:
                 root_file = Path(root_path).expanduser()
                 if root_file.is_file():
-                    console.print(f"\n[cyan]Installing root CA into ROOT store…[/cyan]")
+                    console.print("\n[cyan]Installing root CA into ROOT store…[/cyan]")
                     out = ssh.send_command(
                         f"CERTIFICATE ADDF {root_file.name} ROOT", timeout=30
                     )
@@ -2273,14 +2283,14 @@ def _flow_install_cert(config: Config) -> None:
             if inter_path:
                 inter_file = Path(inter_path).expanduser()
                 if inter_file.is_file():
-                    console.print(f"\n[cyan]Installing intermediate into INTERMEDIATE store…[/cyan]")
+                    console.print("\n[cyan]Installing intermediate into INTERMEDIATE store…[/cyan]")
                     out = ssh.send_command(
                         f"CERTIFICATE ADDF {inter_file.name} INTERMEDIATE", timeout=30
                     )
                     console.print(f"  {out.strip()}")
 
             # Install webserver cert
-            console.print(f"\n[cyan]Installing certificate into WEBSERVER store…[/cyan]")
+            console.print("\n[cyan]Installing certificate into WEBSERVER store…[/cyan]")
             addf_cmd = f"CERTIFICATE ADDF {cert_file.name} WEBSERVER"
             if needs_password and key_password:
                 addf_cmd += f" {key_password}"
@@ -2521,14 +2531,6 @@ def _flow_bulk_deploy_cert(
 # --------------------------------------------------------------------------- #
 #  IP Table Management flow
 # --------------------------------------------------------------------------- #
-
-# Type alias for console connections — CrestronSSH and CrestronCTP share
-# the same send_command() / disconnect() API.
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from .ctp import CrestronCTP
-    _ConsoleConn = CrestronSSH | CrestronCTP
-
 
 @dataclass
 class _IPTableEntry:
@@ -3585,7 +3587,7 @@ def _add_firmware_url(config: Config) -> Config:
 
 def _flow_manage_profiles(config: Config) -> Config:
     """Manage configuration profiles (list, create, edit, delete)."""
-    from .models import ExtraCommand, PROFILE_SETTING_FIELDS
+    from .models import PROFILE_SETTING_FIELDS
 
     while True:
         _header("Manage Profiles")
@@ -3648,7 +3650,7 @@ def _flow_manage_profiles(config: Config) -> Config:
 
 def _create_profile(config: Config) -> Config:
     """Create a new configuration profile."""
-    from .models import ExtraCommand, PROFILE_SETTING_FIELDS
+    from .models import ExtraCommand
 
     name = questionary.text("Profile name (e.g., touch-panels):").ask()
     if not name or name in config.profiles:

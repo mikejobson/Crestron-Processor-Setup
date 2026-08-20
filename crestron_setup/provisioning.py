@@ -30,7 +30,7 @@ from .firmware import (
     find_local_firmware,
     version_compare,
 )
-from .models import Config, Device, ExtraCommand, SKIP, resolve_profile, ResolvedProfile
+from .models import Config, Device, resolve_profile, ResolvedProfile
 from .ssh import CrestronFirstBoot, CrestronSSH, check_ssh_ready, sftp_upload
 from .timezones import timezone_label
 
@@ -259,8 +259,6 @@ def _run_provisioning(
     resolved: ResolvedProfile | None = None,
 ) -> bool:
     """Execute all phases inside a Live display. Returns True on success."""
-    model_name = ""
-    current_puf_version = ""
     pubkey_path = _resolve_pubkey(config.pubkey_file)
     # Track whether we downloaded the key (needs cleanup)
     _is_temp_key = pubkey_path is not None and str(pubkey_path).startswith(
@@ -1358,7 +1356,7 @@ def _wait_for_reboot(
     while elapsed < reboot_timeout:
         if ping_only:
             tracker.details[phase] = (
-                f"Ping OK — device online" if ping_ok
+                "Ping OK — device online" if ping_ok
                 else f"Waiting for response… {elapsed}s"
             )
         else:
@@ -1510,7 +1508,7 @@ def upload_program(
 
             try:
                 with CrestronSSH(host, username, password, use_key_auth=use_key_auth) as ssh:
-                    output = ssh.send_command(f"PROGLOAD -P:{slot_str}", timeout=30)
+                    ssh.send_command(f"PROGLOAD -P:{slot_str}", timeout=30)
                     tracker.ok(1, f"Slot {slot_str} loaded")
                     success = True
             except Exception as e:
