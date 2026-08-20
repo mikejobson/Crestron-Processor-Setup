@@ -84,6 +84,9 @@ firmware_urls:
 discovery:
   timeout: 5 # Seconds to listen for responses
   broadcast_count: 3 # Number of broadcast packets to send
+  # First-boot check that runs against every discovered device.
+  probe_timeout: 10 # Per-device budget in seconds (web check, then SSH)
+  probe_workers: 16 # Devices probed in parallel — raise for large estates
 
 # ─── Configuration Profiles ───────────────────────────────────────────────
 # Profiles let you customise provisioning per device type.

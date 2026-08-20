@@ -10,6 +10,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path as _Path
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 try:
     import termios
@@ -22,6 +23,7 @@ import questionary
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
+from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
@@ -39,6 +41,16 @@ from .provisioning import (
     upload_program,
 )
 from .ssh import CrestronFirstBoot
+
+if TYPE_CHECKING:
+    # Imported for annotations only — the runtime imports happen inside the
+    # flows that need a connection, to keep startup light.
+    from .ctp import CrestronCTP
+    from .ssh import CrestronSSH
+
+    # Console connections: CrestronSSH and CrestronCTP share the same
+    # send_command() / disconnect() API.
+    _ConsoleConn = CrestronSSH | CrestronCTP
 from .timezones import timezone_choices, timezone_label
 from .updater import (
     InstallMethod,
@@ -371,6 +383,71 @@ def main() -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _first_boot_panel(spinner: Spinner, done: int, total: int,
+                      first_boot: list[str]) -> Panel:
+    """Build a live panel showing first-boot check progress."""
+    grid = Table.grid(padding=(0, 1))
+    grid.add_column(width=3)
+    grid.add_column()
+    grid.add_row(spinner, Text.from_markup(
+        f"[bold cyan]Checking first-boot state…[/bold cyan] "
+        f"[dim]{done}/{total} devices[/dim]"))
+    if first_boot:
+        grid.add_row("", Text.from_markup(
+            f"[yellow]{len(first_boot)} in first-boot mode[/yellow]"))
+        for host in first_boot[-8:]:
+            grid.add_row("", Text.from_markup(f"  [yellow]•[/yellow] {host}"))
+    return Panel(grid, title="[bold]First-Boot Check[/bold]",
+                 border_style="cyan", padding=(1, 2))
+
+
+def _check_first_boot_states(devices: list[Device], config: Config) -> None:
+    """Populate ``is_first_boot`` on every device, checking them in parallel.
+
+    Devices are probed concurrently with a per-device time budget, so a large
+    or partly-unreachable estate no longer costs the sum of every timeout.
+    """
+    if not devices:
+        return
+
+    by_host: dict[str, list[Device]] = {}
+    for dev in devices:
+        host = dev.ip or dev.hostname
+        if host:
+            by_host.setdefault(host, []).append(dev)
+        else:
+            dev.is_first_boot = False
+
+    if not by_host:
+        return
+
+    # Count only devices we can actually reach, so the counter ends at N/N
+    total = sum(len(v) for v in by_host.values())
+
+    spinner = Spinner("dots", style="cyan")
+    progress = {"done": 0}
+    first_boot: list[str] = []
+
+    with Live(_first_boot_panel(spinner, 0, total, first_boot),
+              console=console, refresh_per_second=10) as live:
+
+        def _on_result(host: str, is_first_boot: bool) -> None:
+            for dev in by_host.get(host, ()):
+                dev.is_first_boot = is_first_boot
+            progress["done"] += len(by_host.get(host, ()))
+            if is_first_boot:
+                first_boot.append(host)
+            live.update(_first_boot_panel(spinner, progress["done"], total,
+                                          first_boot))
+
+        CrestronFirstBoot.check_first_boot_batch(
+            list(by_host),
+            budget=config.discovery_probe_timeout,
+            max_workers=config.discovery_probe_workers,
+            on_result=_on_result,
+        )
+
+
 def _flow_discover(config: Config) -> Config:
     """Discover devices on the LAN, select an action, pick devices, and execute."""
     _header("Discover Devices")
@@ -383,10 +460,8 @@ def _flow_discover(config: Config) -> Config:
         _pause()
         return config
 
-    # Check first-boot state for each device
-    with console.status("Checking first-boot state…", spinner="dots"):
-        for dev in devices:
-            dev.is_first_boot = CrestronFirstBoot.check_first_boot(dev.ip)
+    # Check first-boot state for all devices (in parallel)
+    _check_first_boot_states(devices, config)
 
     _header("Discover Devices")
     print_device_table(devices, console)
@@ -858,7 +933,8 @@ def _flow_manual_setup(config: Config) -> None:
 
     # Quick first-boot check
     with console.status("Checking first-boot state…", spinner="dots"):
-        device.is_first_boot = CrestronFirstBoot.check_first_boot(host)
+        device.is_first_boot = CrestronFirstBoot.check_first_boot(
+            host, budget=config.discovery_probe_timeout)
     if device.is_first_boot:
         console.print("[cyan][INFO][/cyan] Device appears to be in first-boot mode.")
 
@@ -1399,7 +1475,6 @@ def _flow_firmware_audit(config: Config) -> None:
 
     from .firmware import (
         _parse_puf_metadata,
-        download_firmware_quiet,
         find_local_firmware,
         query_firmware_server,
         version_compare,
@@ -1418,18 +1493,11 @@ def _flow_firmware_audit(config: Config) -> None:
         _pause()
         return
 
-    # Need credentials to read full PUF version via VER -V
-    # Check for first-boot devices first
-    # Check for first-boot devices first
-    first_boot_devices: list[Device] = []
-    ready_devices: list[Device] = []
-    with console.status("Checking first-boot state…", spinner="dots"):
-        for dev in devices:
-            dev.is_first_boot = CrestronFirstBoot.check_first_boot(dev.ip)
-            if dev.is_first_boot:
-                first_boot_devices.append(dev)
-            else:
-                ready_devices.append(dev)
+    # Need credentials to read full PUF version via VER -V.
+    # Check first-boot state for all devices first (in parallel).
+    _check_first_boot_states(devices, config)
+    first_boot_devices = [d for d in devices if d.is_first_boot]
+    ready_devices = [d for d in devices if not d.is_first_boot]
 
     if first_boot_devices:
         names = ", ".join(d.ip for d in first_boot_devices)
@@ -1663,7 +1731,7 @@ def _flow_firmware_audit(config: Config) -> None:
         ))
     if forceable:
         update_choices.append(questionary.Choice(
-            f"Force firmware on selected devices (including up-to-date)",
+            "Force firmware on selected devices (including up-to-date)",
             value="force",
         ))
     update_choices.append(questionary.Choice("No, just view results", value="skip"))
@@ -2171,7 +2239,7 @@ def _flow_install_cert(config: Config) -> None:
         console.print(f"  Intermediate:  {Path(inter_path).name} → INTERMEDIATE store")
     if root_path and Path(root_path).expanduser().is_file():
         console.print(f"  Root CA:       {Path(root_path).name} → ROOT store")
-    console.print(f"  SSL mode:      CA (activate CA-signed)")
+    console.print("  SSL mode:      CA (activate CA-signed)")
     console.print()
 
     confirm = questionary.confirm("Proceed with installation?").ask()
@@ -2205,7 +2273,7 @@ def _flow_install_cert(config: Config) -> None:
             if root_path:
                 root_file = Path(root_path).expanduser()
                 if root_file.is_file():
-                    console.print(f"\n[cyan]Installing root CA into ROOT store…[/cyan]")
+                    console.print("\n[cyan]Installing root CA into ROOT store…[/cyan]")
                     out = ssh.send_command(
                         f"CERTIFICATE ADDF {root_file.name} ROOT", timeout=30
                     )
@@ -2215,14 +2283,14 @@ def _flow_install_cert(config: Config) -> None:
             if inter_path:
                 inter_file = Path(inter_path).expanduser()
                 if inter_file.is_file():
-                    console.print(f"\n[cyan]Installing intermediate into INTERMEDIATE store…[/cyan]")
+                    console.print("\n[cyan]Installing intermediate into INTERMEDIATE store…[/cyan]")
                     out = ssh.send_command(
                         f"CERTIFICATE ADDF {inter_file.name} INTERMEDIATE", timeout=30
                     )
                     console.print(f"  {out.strip()}")
 
             # Install webserver cert
-            console.print(f"\n[cyan]Installing certificate into WEBSERVER store…[/cyan]")
+            console.print("\n[cyan]Installing certificate into WEBSERVER store…[/cyan]")
             addf_cmd = f"CERTIFICATE ADDF {cert_file.name} WEBSERVER"
             if needs_password and key_password:
                 addf_cmd += f" {key_password}"
@@ -2463,14 +2531,6 @@ def _flow_bulk_deploy_cert(
 # --------------------------------------------------------------------------- #
 #  IP Table Management flow
 # --------------------------------------------------------------------------- #
-
-# Type alias for console connections — CrestronSSH and CrestronCTP share
-# the same send_command() / disconnect() API.
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from .ctp import CrestronCTP
-    _ConsoleConn = CrestronSSH | CrestronCTP
-
 
 @dataclass
 class _IPTableEntry:
@@ -3527,7 +3587,7 @@ def _add_firmware_url(config: Config) -> Config:
 
 def _flow_manage_profiles(config: Config) -> Config:
     """Manage configuration profiles (list, create, edit, delete)."""
-    from .models import ExtraCommand, PROFILE_SETTING_FIELDS
+    from .models import PROFILE_SETTING_FIELDS
 
     while True:
         _header("Manage Profiles")
@@ -3590,7 +3650,7 @@ def _flow_manage_profiles(config: Config) -> Config:
 
 def _create_profile(config: Config) -> Config:
     """Create a new configuration profile."""
-    from .models import ExtraCommand, PROFILE_SETTING_FIELDS
+    from .models import ExtraCommand
 
     name = questionary.text("Profile name (e.g., touch-panels):").ask()
     if not name or name in config.profiles:

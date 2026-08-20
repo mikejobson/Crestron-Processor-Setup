@@ -166,6 +166,8 @@ def resolve_profile(profile_name: str | None, config: Config) -> ResolvedProfile
         firmware_server=config.firmware_server,
         discovery_timeout=config.discovery_timeout,
         discovery_broadcast_count=config.discovery_broadcast_count,
+        discovery_probe_timeout=config.discovery_probe_timeout,
+        discovery_probe_workers=config.discovery_probe_workers,
         profiles=config.profiles,
         csr_defaults=config.csr_defaults,
         certificates=config.certificates,
@@ -221,6 +223,12 @@ class Config:
     firmware_server: str = ""
     discovery_timeout: int = 5
     discovery_broadcast_count: int = 3
+    # Per-device time budget (seconds) and concurrency for the first-boot
+    # check that runs after discovery.  Defaults mirror FIRST_BOOT_BUDGET /
+    # FIRST_BOOT_WORKERS in ssh.py, duplicated here to keep models.py free of
+    # heavier imports.
+    discovery_probe_timeout: float = 10.0
+    discovery_probe_workers: int = 16
     profiles: dict[str, Profile] = field(default_factory=dict)
     csr_defaults: CsrDefaults = field(default_factory=CsrDefaults)
     certificates: CertificateConfig = field(default_factory=CertificateConfig)

@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import os
 import re
+import socket
 import time
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
+from typing import Callable, Sequence
 
 import paramiko
 from rich.console import Console
@@ -24,6 +27,18 @@ PROMPT_END_RE = re.compile(rb"([A-Za-z0-9][-A-Za-z0-9]*[A-Za-z0-9])>\s*$")
 # Timeout waiting for prompt responses
 DEFAULT_TIMEOUT = 15
 CONNECT_TIMEOUT = 10
+
+# ── First-boot probe tuning ───────────────────────────────────────────────── #
+# The first-boot check runs against every discovered device, so it is tuned
+# for throughput rather than patience: a cheap TCP reachability probe gates
+# each expensive handshake, and the whole check is bounded by a per-device
+# time budget so one unresponsive device cannot stall a large batch.
+PORT_PROBE_TIMEOUT = 1.5        # TCP connect probe before a real handshake
+FIRST_BOOT_BUDGET = 10.0        # Per-device wall-clock budget (seconds)
+FIRST_BOOT_HTTPS_TIMEOUT = 4.0  # Max time for the web UI check
+FIRST_BOOT_SSH_TIMEOUT = 8.0    # Max time for the SSH fallback
+FIRST_BOOT_SSH_CONNECT = 4.0    # Max time for the SSH TCP connect alone
+FIRST_BOOT_WORKERS = 16         # Devices probed concurrently
 
 
 class CrestronSSH:
@@ -211,53 +226,180 @@ class CrestronFirstBoot:
             client.close()
 
     @staticmethod
-    def check_first_boot(host: str) -> bool:
+    def check_first_boot(host: str, budget: float = FIRST_BOOT_BUDGET) -> bool:
         """Quick check whether a processor is in first-boot state.
 
-        First tries HTTPS — on first boot the web UI redirects to
-        /createUser.html. Falls back to SSH as crestron/empty password
-        and looks for the Username: prompt.
+        Runs in stages, cheapest first, and gives up once ``budget``
+        seconds have elapsed:
+
+        1. TCP probe of :443 — skip the web check entirely if it is closed.
+        2. HTTPS — on first boot the web UI redirects to /createUser.html.
+           A page that loads *without* that redirect is a definitive "already
+           provisioned", so no SSH attempt is needed.
+        3. TCP probe of :22 followed by SSH as crestron/empty password,
+           looking for the ``Username:`` prompt.  Only reached when HTTPS was
+           inconclusive (unreachable, errored, or a non-2xx/3xx response).
+
+        Returns True only when first-boot state is positively detected;
+        anything unknown or unreachable reads as False, as before.
         """
-        # Fast path: check the web UI for the first-boot page
-        if _check_first_boot_https(host):
-            return True
+        deadline = time.monotonic() + max(budget, 1.0)
 
-        # Slow path: try SSH with default credentials
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        try:
-            client.connect(
-                host, username="crestron", password="",
-                timeout=5, look_for_keys=False, allow_agent=False,
-            )
-        except (paramiko.AuthenticationException, paramiko.SSHException, OSError):
-            return False
+        def remaining() -> float:
+            return deadline - time.monotonic()
 
-        try:
-            channel = client.invoke_shell(width=200, height=50)
-            channel.settimeout(5)
-            output = _read_until(channel, [b"Username:", b">"], timeout=5)
-            is_first_boot = b"Username:" in output
-            channel.close()
-            return is_first_boot
-        except Exception:
+        probe = min(PORT_PROBE_TIMEOUT, max(budget / 4, 0.25))
+
+        # Stage 1+2: web UI
+        if _port_open(host, 443, min(probe, max(remaining(), 0.1))):
+            https_timeout = min(FIRST_BOOT_HTTPS_TIMEOUT, remaining())
+            if https_timeout > 0.5:
+                verdict = _check_first_boot_https(host, timeout=https_timeout)
+                if verdict is not None:
+                    return verdict
+
+        # Stage 3: SSH fallback
+        ssh_timeout = min(FIRST_BOOT_SSH_TIMEOUT, remaining())
+        if ssh_timeout <= 1.0:
             return False
+        if not _port_open(host, 22, min(probe, ssh_timeout)):
+            return False
+        return _check_first_boot_ssh(
+            host, timeout=min(FIRST_BOOT_SSH_TIMEOUT, max(remaining(), 1.0))
+        )
+
+    @staticmethod
+    def check_first_boot_batch(
+        hosts: Sequence[str],
+        budget: float = FIRST_BOOT_BUDGET,
+        max_workers: int = FIRST_BOOT_WORKERS,
+        on_result: Callable[[str, bool], None] | None = None,
+    ) -> dict[str, bool]:
+        """Check first-boot state for many hosts concurrently.
+
+        Each host is checked with :meth:`check_first_boot` (so each is
+        individually bounded by ``budget``) on a thread pool of at most
+        ``max_workers`` threads.  ``on_result`` is invoked from the calling
+        thread as each result lands, for progress reporting.
+
+        Hosts that do not finish before the overall deadline are reported as
+        False rather than holding up the batch.
+        """
+        unique = list(dict.fromkeys(h for h in hosts if h))
+        results: dict[str, bool] = {h: False for h in unique}
+        if not unique:
+            return results
+
+        workers = max(1, min(max_workers, len(unique)))
+        # Each host self-limits to `budget`; allow one budget per wave plus
+        # slack as a backstop against a thread wedged in a syscall.
+        waves = -(-len(unique) // workers)
+        overall_deadline = time.monotonic() + budget * waves + 5.0
+
+        pool = ThreadPoolExecutor(max_workers=workers)
+        try:
+            futures: dict[Future[bool], str] = {
+                pool.submit(CrestronFirstBoot.check_first_boot, host, budget): host
+                for host in unique
+            }
+            pending: set[Future[bool]] = set(futures)
+            while pending:
+                timeout = overall_deadline - time.monotonic()
+                if timeout <= 0:
+                    break
+                done, pending = wait(pending, timeout=timeout,
+                                     return_when="FIRST_COMPLETED")
+                if not done:
+                    break
+                for fut in done:
+                    host = futures[fut]
+                    try:
+                        results[host] = bool(fut.result())
+                    except Exception:
+                        results[host] = False
+                    if on_result:
+                        on_result(host, results[host])
         finally:
-            client.close()
+            pool.shutdown(wait=False, cancel_futures=True)
+        return results
 
 
-def _check_first_boot_https(host: str) -> bool:
-    """Check if the web UI redirects to /createUser.html (first-boot indicator)."""
+def _port_open(host: str, port: int, timeout: float = PORT_PROBE_TIMEOUT) -> bool:
+    """Cheap TCP reachability probe, used to gate expensive handshakes."""
+    if timeout <= 0:
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _check_first_boot_ssh(host: str, timeout: float = FIRST_BOOT_SSH_TIMEOUT) -> bool:
+    """Look for the first-boot ``Username:`` prompt over SSH.
+
+    ``timeout`` is the total budget for connect, banner, auth and the prompt
+    read.  :22 has already been proven open by the caller, so the TCP connect
+    gets a short slice and the rest goes to the handshake — Crestron devices
+    can be slow to emit their SSH banner, and cutting that short would
+    misreport a first-boot device as already provisioned.
+    """
+    deadline = time.monotonic() + timeout
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(
+            host, username="crestron", password="",
+            timeout=min(FIRST_BOOT_SSH_CONNECT, timeout),
+            banner_timeout=timeout, auth_timeout=timeout,
+            look_for_keys=False, allow_agent=False,
+        )
+    except Exception:
+        # Auth failure, unreachable, or a stalled handshake — not first boot
+        client.close()
+        return False
+
+    try:
+        read_timeout = max(deadline - time.monotonic(), 1.0)
+        channel = client.invoke_shell(width=200, height=50)
+        channel.settimeout(read_timeout)
+        output = _read_until(channel, [b"Username:", b">"], timeout=read_timeout)
+        is_first_boot = b"Username:" in output
+        channel.close()
+        return is_first_boot
+    except Exception:
+        return False
+    finally:
+        client.close()
+
+
+def _check_first_boot_https(host: str,
+                            timeout: float = FIRST_BOOT_HTTPS_TIMEOUT) -> bool | None:
+    """Probe the web UI for the first-boot page.
+
+    Returns True when the UI redirects to /createUser.html, False when a
+    normal page is served (definitively already provisioned), and None when
+    the check is inconclusive and the SSH fallback should be tried.
+    """
+    connect_timeout = min(timeout, max(PORT_PROBE_TIMEOUT * 2, 1.0))
     try:
         resp = httpx.get(
             f"https://{host}/",
             verify=False,
-            timeout=5,
+            timeout=httpx.Timeout(timeout, connect=connect_timeout),
             follow_redirects=True,
         )
-        return "createUser" in str(resp.url) or "createUser" in resp.text
     except Exception:
-        return False
+        return None
+
+    try:
+        if "createUser" in str(resp.url) or "createUser" in resp.text:
+            return True
+    except Exception:
+        return None
+    # A page served without the first-boot redirect means the device already
+    # has an account; an error page tells us nothing.
+    return False if resp.status_code < 400 else None
 
 
 def _read_until(channel: paramiko.Channel, markers: list[bytes],

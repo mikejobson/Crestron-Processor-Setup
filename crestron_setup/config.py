@@ -185,6 +185,12 @@ def load_config() -> Config:
         firmware_server=data.get("firmware_server", ""),
         discovery_timeout=int(discovery.get("timeout", 5)),
         discovery_broadcast_count=int(discovery.get("broadcast_count", 3)),
+        discovery_probe_timeout=max(
+            2.0, float(discovery.get("probe_timeout", 10.0))
+        ),
+        discovery_probe_workers=max(
+            1, int(discovery.get("probe_workers", 16))
+        ),
         profiles=_parse_profiles(data.get("profiles")),
         csr_defaults=csr_defaults,
         certificates=certificates,
@@ -224,6 +230,8 @@ def save_config(config: Config) -> Path:
         "discovery": {
             "timeout": config.discovery_timeout,
             "broadcast_count": config.discovery_broadcast_count,
+            "probe_timeout": config.discovery_probe_timeout,
+            "probe_workers": config.discovery_probe_workers,
         },
     }
 

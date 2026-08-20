@@ -19,7 +19,7 @@ from rich.progress import (
     TransferSpeedColumn,
 )
 
-from .models import Config, FirmwareSource
+from .models import Config
 
 # Firmware filename pattern: {model}_{version}.puf or .zip
 FW_PATTERN = re.compile(r"^(.+?)_([\d.]+)\.puf$", re.IGNORECASE)
@@ -145,7 +145,7 @@ def download_from_server(
         if console:
             console.print(f"[green][OK][/green] Downloaded: {dest.name}")
             if info.file_hash:
-                console.print(f"  [dim]Hash verified[/dim]")
+                console.print("  [dim]Hash verified[/dim]")
         return dest, "downloaded"
 
     except httpx.HTTPStatusError as e:
