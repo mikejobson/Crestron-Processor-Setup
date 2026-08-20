@@ -57,7 +57,8 @@ The Crestron CLI is **not** a standard shell — it uses a custom `MODEL>` promp
 - `VER -V` output has **leading whitespace** — don't anchor with `^` when parsing.
 - The processor needs time after reboot before SFTP is ready (SSH may respond first). Firmware uploads happen **before** the reboot phase.
 - Discovery requires root/admin for UDP broadcast on port 41794.
-- First-boot detection: HTTPS check for `/createUser.html` redirect (fast) → SSH as `crestron` with empty password (fallback). If `Username:` prompt appears over SSH, it's first boot; if `MODEL>` prompt appears, it's already configured.
+- First-boot detection is staged and bounded (see `CrestronFirstBoot.check_first_boot`): TCP probe :443 → HTTPS check for `/createUser.html` redirect → TCP probe :22 → SSH as `crestron` with empty password. `_check_first_boot_https` is **tri-state**: True = first boot, False = definitively provisioned (skip SSH), None = inconclusive (try SSH). If the `Username:` prompt appears over SSH, it's first boot; if a `MODEL>` prompt appears, it's already configured.
+- Never check first-boot state in a serial loop over discovered devices — use `CrestronFirstBoot.check_first_boot_batch` (or `cli._check_first_boot_states`), which fans out across a thread pool with a per-device time budget.
 
 ## Testing
 

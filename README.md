@@ -106,6 +106,34 @@ Copy `config.example.yaml` to get started. Key settings:
 | `default_username` | _(empty)_                | Pre-filled username for SSH connection prompts                           |
 | `ssh_key_auth`     | `true`                   | Try SSH key auth (agent + key files) before prompting for password       |
 
+Discovery behaviour is tuned under the `discovery` key:
+
+| Setting          | Default | Description                                                        |
+| ---------------- | ------- | ------------------------------------------------------------------ |
+| `timeout`        | `5`     | Seconds to listen for CIP responses                                |
+| `broadcast_count`| `3`     | Number of broadcast packets to send                                |
+| `probe_timeout`  | `10`    | Per-device budget (seconds) for the first-boot check               |
+| `probe_workers`  | `16`    | Devices probed in parallel during the first-boot check             |
+
+### First-Boot Detection
+
+After discovery, every device is checked for first-boot state. The checks run in
+parallel (`probe_workers`) and each device is bounded by `probe_timeout`, so an
+unresponsive device no longer holds up the rest of the estate. Each device is
+probed cheapest-first:
+
+1. TCP probe of `:443` — the web check is skipped if the port is closed.
+2. HTTPS `GET /` — a redirect to `/createUser.html` means first boot. A page
+   that loads *without* that redirect is a definitive "already provisioned", so
+   no SSH attempt is made.
+3. TCP probe of `:22`, then SSH as `crestron` with an empty password looking for
+   the `Username:` prompt — only when the HTTPS check was inconclusive
+   (unreachable, timed out, or an error response).
+
+On a large estate of already-provisioned devices this normally settles in step 2.
+Raise `probe_workers` for bigger estates, or `probe_timeout` on slow links where
+devices are being misreported as already provisioned.
+
 ### SSH Key Authentication
 
 When `ssh_key_auth` is enabled (default), the tool tries key-based authentication before asking for a password. This works with:
