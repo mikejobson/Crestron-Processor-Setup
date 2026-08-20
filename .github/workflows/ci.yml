@@ -40,8 +40,9 @@ jobs:
       - name: Check the legacy bash script parses
         run: bash -n setup_processor.sh
 
-      - name: Check config.example.yaml is valid YAML
-        run: python -c "import yaml,sys; yaml.safe_load(open('config.example.yaml'))"
+      # config.example.yaml is validated in the test job, which has pyyaml:
+      # tests/test_config.py checks it parses *and* that the loader honours
+      # every key in it. Keeping this job dependency-free keeps it fast.
 
   # ── Tests ──────────────────────────────────────────────────────────────
   test:
