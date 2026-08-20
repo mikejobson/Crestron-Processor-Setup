@@ -275,10 +275,26 @@ Profiles are managed interactively via **Settings → Manage Profiles**, or edit
 | Path                            | Purpose                                                      |
 | ------------------------------- | ------------------------------------------------------------ |
 | `crestron_setup/`               | Python package — CLI, discovery, SSH, provisioning, firmware |
+| `tests/`                        | Pytest suite (hardware-free — network boundaries are stubbed)|
 | `config.example.yaml`           | Template configuration file                                  |
 | `setup_processor.sh`            | Legacy bash script (macOS only, requires `expect`)           |
 | `crestron_command_reference.md` | CLI command reference (414 commands) from a live CP4         |
 | `example commands.txt`          | Reference log of a manual setup session                      |
+
+## Development
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+
+pytest          # test suite
+ruff check .    # lint
+```
+
+Every pull request runs lint, the test suite on Python 3.10–3.13, and a
+packaging build (`.github/workflows/ci.yml`). Nothing is published from a PR —
+releases are cut by pushing a `v*` tag, which triggers `release.yml`.
 
 ## Legacy Bash Script
 

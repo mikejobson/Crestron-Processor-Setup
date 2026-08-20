@@ -62,11 +62,20 @@ The Crestron CLI is **not** a standard shell — it uses a custom `MODEL>` promp
 
 ## Testing
 
+CI (`.github/workflows/ci.yml`) runs on every pull request and on pushes to
+`main`: ruff, pytest across Python 3.10–3.13, and a packaging build. It never
+publishes — releasing is `release.yml`, triggered only by a `v*` tag. Run the
+same checks locally before pushing:
+
 ```bash
-# Create venv and install
+# Create venv and install with test dependencies
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[dev]"
+
+# The two gates CI enforces
+pytest
+ruff check .
 
 # Run the console
 python -m crestron_setup
@@ -78,3 +87,8 @@ sudo .venv/bin/python -m crestron_setup
 bash -n setup_processor.sh
 ./setup_processor.sh <hostname-or-ip>
 ```
+
+Tests must stay hardware-free — no real device is reachable in CI. Network
+boundaries are stubbed: `httpx.get` for the web check, `_port_open` for TCP
+probes, `CrestronFirstBoot.check_first_boot` for batch-level tests. Timing
+assertions use generous headroom so slow runners do not flake.
