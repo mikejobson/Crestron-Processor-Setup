@@ -30,7 +30,7 @@ from .firmware import (
     find_local_firmware,
     version_compare,
 )
-from .models import Config, Device, ExtraCommand, SKIP, resolve_profile, ResolvedProfile
+from .models import CommonSettings, Config, Device, resolve_profile, ResolvedProfile
 from .ssh import CrestronFirstBoot, CrestronSSH, check_ssh_ready, sftp_upload
 from .timezones import timezone_label
 
@@ -259,8 +259,6 @@ def _run_provisioning(
     resolved: ResolvedProfile | None = None,
 ) -> bool:
     """Execute all phases inside a Live display. Returns True on success."""
-    model_name = ""
-    current_puf_version = ""
     pubkey_path = _resolve_pubkey(config.pubkey_file)
     # Track whether we downloaded the key (needs cleanup)
     _is_temp_key = pubkey_path is not None and str(pubkey_path).startswith(
@@ -1358,7 +1356,7 @@ def _wait_for_reboot(
     while elapsed < reboot_timeout:
         if ping_only:
             tracker.details[phase] = (
-                f"Ping OK — device online" if ping_ok
+                "Ping OK — device online" if ping_ok
                 else f"Waiting for response… {elapsed}s"
             )
         else:
@@ -1510,7 +1508,7 @@ def upload_program(
 
             try:
                 with CrestronSSH(host, username, password, use_key_auth=use_key_auth) as ssh:
-                    output = ssh.send_command(f"PROGLOAD -P:{slot_str}", timeout=30)
+                    ssh.send_command(f"PROGLOAD -P:{slot_str}", timeout=30)
                     tracker.ok(1, f"Slot {slot_str} loaded")
                     success = True
             except Exception as e:
@@ -1645,3 +1643,228 @@ class _ParallelDisplay:
             border_style="cyan",
             padding=(1, 2),
         )
+
+
+# --------------------------------------------------------------------------- #
+#  Bulk common-settings push
+# --------------------------------------------------------------------------- #
+
+# An IPv4 address in dot-decimal notation.
+_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+# A line that carries a field label, e.g. "DNS Server....... 10.0.0.1".
+# Used to tell a labelled line from a bare continuation line.
+_LABELLED_LINE_RE = re.compile(r"[A-Za-z]{2,}")
+
+
+def parse_dns_servers(ipconfig_output: str) -> list[str]:
+    """Extract the configured DNS servers from ``IPCONFIG /ALL`` output.
+
+    Written to tolerate several layouts, because the exact wording varies
+    between Crestron models and firmware revisions.  Any line whose label
+    mentions DNS contributes every IPv4 address on it, and bare
+    address-only lines immediately following one are treated as
+    continuations (the multi-server layout).
+
+    Returns addresses in the order seen, de-duplicated, with unset
+    placeholders (0.0.0.0) dropped.  An unrecognised layout yields an empty
+    list rather than a wrong answer.
+    """
+    found: list[str] = []
+    in_dns_block = False
+
+    for raw in ipconfig_output.splitlines():
+        line = raw.strip()
+        if not line:
+            in_dns_block = False
+            continue
+
+        addresses = _IPV4_RE.findall(line)
+        is_dns_label = "dns" in line.lower()
+
+        if is_dns_label:
+            # A DNS label with no address (e.g. "DNS Suffix ... :") still
+            # opens the block, so a following bare address is picked up.
+            found.extend(addresses)
+            in_dns_block = True
+            continue
+
+        # A different labelled field ends the DNS block.
+        label_part = _IPV4_RE.sub("", line)
+        if _LABELLED_LINE_RE.search(label_part):
+            in_dns_block = False
+            continue
+
+        if in_dns_block:
+            found.extend(addresses)
+
+    seen: set[str] = set()
+    servers: list[str] = []
+    for addr in found:
+        if addr in ("0.0.0.0", "255.255.255.255") or addr in seen:
+            continue
+        # Reject malformed matches like 999.1.1.1
+        if any(int(octet) > 255 for octet in addr.split(".")):
+            continue
+        seen.add(addr)
+        servers.append(addr)
+    return servers
+
+
+def plan_dns_changes(
+    desired: list[str],
+    current: list[str],
+    mode: str = "replace",
+) -> tuple[list[str], list[str]]:
+    """Work out which DNS servers to remove and which to add.
+
+    In "replace" mode the device's list is reconciled against ``desired``;
+    in "append" mode nothing is removed.  Servers already present are left
+    alone, so applying the same list twice is a no-op.
+
+    Returns ``(to_remove, to_add)``.
+    """
+    desired_unique = list(dict.fromkeys(d for d in desired if d))
+    to_add = [d for d in desired_unique if d not in current]
+    if mode == "append":
+        return [], to_add
+    to_remove = [c for c in current if c not in desired_unique]
+    return to_remove, to_add
+
+
+def build_common_setting_commands(
+    settings: CommonSettings,
+    current_dns: list[str] | None = None,
+    now: datetime | None = None,
+) -> list[tuple[str, str]]:
+    """Build the CLI commands for a bulk settings push.
+
+    Returns ``(command, human_label)`` pairs in the order they should be
+    sent.  ``current_dns`` is what the device reports today, used to compute
+    a minimal set of DNS changes; pass None to skip reconciliation and only
+    add.  Only fields set on ``settings`` produce commands, so an empty
+    bundle produces an empty list.
+    """
+    cmds: list[tuple[str, str]] = []
+
+    if settings.timezone is not None:
+        cmds.append((f"TIMEZONE {settings.timezone}",
+                     f"Timezone → {settings.timezone}"))
+
+    if settings.sync_time:
+        stamp = now or datetime.now()
+        cmds.append((
+            f"TIMEDATE {stamp.strftime('%H:%M:%S')} {stamp.strftime('%m-%d-%Y')}",
+            "Set date/time",
+        ))
+
+    if settings.ntp_server is not None:
+        cmds.append((f"SNTP SERVER:{settings.ntp_server}",
+                     f"NTP → {settings.ntp_server}"))
+
+    # One SYNC covers both a new server and an explicit time sync.
+    if settings.ntp_server is not None or settings.sync_time:
+        cmds.append(("SNTP SYNC", "Sync time"))
+
+    if settings.dns_servers is not None:
+        to_remove, to_add = plan_dns_changes(
+            settings.dns_servers, current_dns or [], settings.dns_mode,
+        )
+        for dns in to_remove:
+            cmds.append((f"REMDNS {dns}", f"Remove DNS {dns}"))
+        for dns in to_add:
+            cmds.append((f"ADDDNS {dns}", f"Add DNS {dns}"))
+
+    if settings.web_port is not None:
+        cmds.append((f"WEBPORT {settings.web_port}",
+                     f"Web port → {settings.web_port}"))
+    if settings.secure_web_port is not None:
+        cmds.append((f"SECUREWEBPORT {settings.secure_web_port}",
+                     f"Secure web port → {settings.secure_web_port}"))
+    if settings.user_login_attempts is not None:
+        cmds.append((f"SETUSERLOGINATTEMPTS {settings.user_login_attempts}",
+                     f"User login attempts → {settings.user_login_attempts}"))
+    if settings.user_lockout_time is not None:
+        cmds.append((f"SETUSERLOCKOUTTIME {settings.user_lockout_time}",
+                     f"User lockout time → {settings.user_lockout_time}"))
+    if settings.login_attempts is not None:
+        cmds.append((f"SETLOGINATTEMPTS {settings.login_attempts}",
+                     f"Console login attempts → {settings.login_attempts}"))
+    if settings.lockout_time is not None:
+        cmds.append((f"SETLOCKOUTTIME {settings.lockout_time}",
+                     f"Console lockout time → {settings.lockout_time}"))
+    if settings.fips_mode is not None:
+        cmds.append((f"FIPSMODE {settings.fips_mode}",
+                     f"FIPS mode → {settings.fips_mode}"))
+
+    return cmds
+
+
+@dataclass
+class SettingsPushResult:
+    """Outcome of pushing common settings to one device."""
+
+    host: str
+    success: bool
+    detail: str = ""
+    commands: list[str] = field(default_factory=list)
+    current_dns: list[str] = field(default_factory=list)
+
+
+def apply_common_settings(
+    device: Device,
+    username: str,
+    password: str,
+    settings: CommonSettings,
+    config: Config,
+    dry_run: bool = False,
+) -> SettingsPushResult:
+    """Push the settings in ``settings`` to one device.
+
+    Opens a single SSH session, reads the current DNS list when DNS is being
+    reconciled, then sends only the commands the bundle calls for.  Never
+    touches IP address, mask, gateway or hostname, and never reboots.
+
+    Safe to call concurrently for different devices.
+    """
+    host = device.ip or device.hostname
+    if settings.is_empty:
+        return SettingsPushResult(host, True, "Nothing to apply")
+
+    needs_current_dns = (
+        settings.dns_servers is not None and settings.dns_mode == "replace"
+    )
+
+    try:
+        with CrestronSSH(host, username, password,
+                         use_key_auth=config.ssh_key_auth) as ssh:
+            if not device.model and ssh.model:
+                device.model = ssh.model
+
+            current_dns: list[str] = []
+            if needs_current_dns:
+                ipconfig = ssh.send_command("IPCONFIG /ALL", timeout=15)
+                current_dns = parse_dns_servers(ipconfig)
+
+            cmds = build_common_setting_commands(settings, current_dns)
+            if not cmds:
+                return SettingsPushResult(
+                    host, True, "Already up to date", [], current_dns,
+                )
+
+            if dry_run:
+                return SettingsPushResult(
+                    host, True, f"Would send {len(cmds)} command(s)",
+                    [c for c, _ in cmds], current_dns,
+                )
+
+            for cmd, _label in cmds:
+                ssh.send_command(cmd, timeout=20)
+
+            detail = f"{len(cmds)} command(s) applied"
+            if settings.needs_reboot:
+                detail += " (reboot needed for FIPS)"
+            return SettingsPushResult(
+                host, True, detail, [c for c, _ in cmds], current_dns,
+            )
+    except Exception as e:
+        return SettingsPushResult(host, False, str(e)[:70])

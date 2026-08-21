@@ -44,6 +44,56 @@ class Device:
 
 
 @dataclass
+class CommonSettings:
+    """Settings that are identical across devices, for pushing in bulk.
+
+    Only fields that are not ``None`` are sent to the device, so a caller can
+    push just DNS, or just NTP and timezone, without touching anything else.
+
+    Deliberately carries no per-device identity — no IP address, subnet mask,
+    gateway or hostname. Those live on :class:`NetworkConfig` and have to be
+    confirmed per device; everything here is safe to fan out unchanged.
+    """
+
+    timezone: str | None = None
+    ntp_server: str | None = None
+    sync_time: bool = False
+    dns_servers: list[str] | None = None
+    # "replace" reconciles the device's list against dns_servers (removing
+    # what is not wanted); "append" only adds.
+    dns_mode: str = "replace"
+    web_port: int | None = None
+    secure_web_port: int | None = None
+    user_login_attempts: int | None = None
+    user_lockout_time: str | None = None
+    login_attempts: int | None = None
+    lockout_time: str | None = None
+    fips_mode: str | None = None
+
+    @property
+    def is_empty(self) -> bool:
+        """True when nothing at all would be sent."""
+        return not any((
+            self.timezone is not None,
+            self.ntp_server is not None,
+            self.sync_time,
+            self.dns_servers is not None,
+            self.web_port is not None,
+            self.secure_web_port is not None,
+            self.user_login_attempts is not None,
+            self.user_lockout_time is not None,
+            self.login_attempts is not None,
+            self.lockout_time is not None,
+            self.fips_mode is not None,
+        ))
+
+    @property
+    def needs_reboot(self) -> bool:
+        """True when a setting only takes effect after a reboot."""
+        return self.fips_mode is not None
+
+
+@dataclass
 class FirmwareSource:
     """Download location for a model's firmware."""
 
@@ -164,6 +214,7 @@ def resolve_profile(profile_name: str | None, config: Config) -> ResolvedProfile
         last_project_file=config.last_project_file,
         firmware_urls=config.firmware_urls,
         firmware_server=config.firmware_server,
+        dns_servers=config.dns_servers,
         discovery_timeout=config.discovery_timeout,
         discovery_broadcast_count=config.discovery_broadcast_count,
         discovery_probe_timeout=config.discovery_probe_timeout,
@@ -221,6 +272,7 @@ class Config:
     last_project_file: str = ""
     firmware_urls: dict[str, FirmwareSource] = field(default_factory=dict)
     firmware_server: str = ""
+    dns_servers: list[str] = field(default_factory=list)
     discovery_timeout: int = 5
     discovery_broadcast_count: int = 3
     # Per-device time budget (seconds) and concurrency for the first-boot

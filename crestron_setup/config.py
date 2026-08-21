@@ -135,6 +135,19 @@ def _serialize_profiles(profiles: dict[str, Profile]) -> dict:
     return result
 
 
+def _parse_dns_servers(raw: object) -> list[str]:
+    """Parse the dns_servers key, accepting a list or a comma-separated string."""
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        parts = raw.split(",")
+    elif isinstance(raw, (list, tuple)):
+        parts = [str(item) for item in raw]
+    else:
+        return []
+    return [p.strip() for p in parts if str(p).strip()]
+
+
 def load_config() -> Config:
     """Load config from YAML, falling back to defaults for missing keys."""
     # Check local config first, then platform config dir
@@ -183,6 +196,7 @@ def load_config() -> Config:
         last_project_file=data.get("last_project_file", ""),
         firmware_urls=_parse_firmware_urls(data.get("firmware_urls")),
         firmware_server=data.get("firmware_server", ""),
+        dns_servers=_parse_dns_servers(data.get("dns_servers")),
         discovery_timeout=int(discovery.get("timeout", 5)),
         discovery_broadcast_count=int(discovery.get("broadcast_count", 3)),
         discovery_probe_timeout=max(
@@ -237,6 +251,9 @@ def save_config(config: Config) -> Path:
 
     if config.firmware_server:
         data["firmware_server"] = config.firmware_server
+
+    if config.dns_servers:
+        data["dns_servers"] = list(config.dns_servers)
 
     if config.default_username:
         data["default_username"] = config.default_username

@@ -38,6 +38,8 @@ The Crestron CLI is **not** a standard shell — it uses a custom `MODEL>` promp
 4. **Reboot** — Send REBOOT, poll ping + SSH (300s timeout)
 5. **Firmware Upload** — Version comparison + SFTP `.puf` to `/firmware/`
 
+**Bulk common settings**: `provisioning.apply_common_settings()` pushes a `CommonSettings` bundle (DNS, NTP, timezone, ports, lockout, FIPS) to one device over a single SSH session; `cli._flow_bulk_apply_settings()` fans it out. `CommonSettings` deliberately has **no** IP/mask/gateway/hostname fields — per-device identity stays on `NetworkConfig` and the provisioning flow. `build_common_setting_commands()` and `parse_dns_servers()` are pure and unit-tested; only fields that are not `None` produce commands.
+
 **Firmware**: `firmware.py` downloads from per-model URLs configured in YAML, caches in `~/.cache/crestron-setup/firmware/`, falls back to a local firmware directory.
 
 **Config**: `config.py` loads from `~/.config/crestron-setup/config.yaml` (macOS/Linux) or `%APPDATA%\crestron-setup\config.yaml` (Windows). A local `config.yaml` takes priority.
@@ -57,16 +59,29 @@ The Crestron CLI is **not** a standard shell — it uses a custom `MODEL>` promp
 - `VER -V` output has **leading whitespace** — don't anchor with `^` when parsing.
 - The processor needs time after reboot before SFTP is ready (SSH may respond first). Firmware uploads happen **before** the reboot phase.
 - Discovery requires root/admin for UDP broadcast on port 41794.
+- `ADDDNS` in the provisioning flow only runs in the **static IP** branch (`provisioning.py`), which is why bulk DNS pushes go through `apply_common_settings()` instead.
+- `parse_dns_servers()` tolerates several `IPCONFIG /ALL` layouts because the wording varies by model/firmware; it returns `[]` on an unrecognised layout rather than guessing. The bulk flow's dry run prints what it detected, so a new model can be confirmed before applying.
+- An empty DNS entry in the bulk flow means "leave DNS alone", never "remove every server".
+
 - First-boot detection is staged and bounded (see `CrestronFirstBoot.check_first_boot`): TCP probe :443 → HTTPS check for `/createUser.html` redirect → TCP probe :22 → SSH as `crestron` with empty password. `_check_first_boot_https` is **tri-state**: True = first boot, False = definitively provisioned (skip SSH), None = inconclusive (try SSH). If the `Username:` prompt appears over SSH, it's first boot; if a `MODEL>` prompt appears, it's already configured.
 - Never check first-boot state in a serial loop over discovered devices — use `CrestronFirstBoot.check_first_boot_batch` (or `cli._check_first_boot_states`), which fans out across a thread pool with a per-device time budget.
 
 ## Testing
 
+CI (`.github/workflows/ci.yml`) runs on every pull request and on pushes to
+`main`: ruff, pytest across Python 3.10–3.13, and a packaging build. It never
+publishes — releasing is `release.yml`, triggered only by a `v*` tag. Run the
+same checks locally before pushing:
+
 ```bash
-# Create venv and install
+# Create venv and install with test dependencies
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[dev]"
+
+# The two gates CI enforces
+pytest
+ruff check .
 
 # Run the console
 python -m crestron_setup
@@ -78,3 +93,8 @@ sudo .venv/bin/python -m crestron_setup
 bash -n setup_processor.sh
 ./setup_processor.sh <hostname-or-ip>
 ```
+
+Tests must stay hardware-free — no real device is reachable in CI. Network
+boundaries are stubbed: `httpx.get` for the web check, `_port_open` for TCP
+probes, `CrestronFirstBoot.check_first_boot` for batch-level tests. Timing
+assertions use generous headroom so slow runners do not flake.
