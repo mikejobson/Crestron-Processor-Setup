@@ -10,6 +10,7 @@ Cross-platform interactive console for Crestron processor provisioning. Discover
 - **Firmware Management** — Download firmware from configurable URLs and upload to processors
 - **Firmware Audit** — Scan discovered devices, compare firmware versions, report which need updates (read-only)
 - **Batch Provisioning** — Import device lists from CSV or YAML files for bulk provisioning with per-device credentials and profiles
+- **Bulk Common Settings** — Push DNS, NTP, timezone, ports, lockout policy and FIPS to many devices at once, without confirming per-device IP settings
 - **Certificate Management** — Generate CSRs, install CA-signed certs, configure TLS settings, and bulk-deploy wildcard certs
 - **IP Table Management** — View, add, remove, and clear master/peer CIP entries on a device with an interactive submenu
 - **Network Configuration** — Set static IP or DHCP per device during provisioning
@@ -103,6 +104,7 @@ Copy `config.example.yaml` to get started. Key settings:
 | `secure_web_port`  | `8443`                   | Secure web server port                                                   |
 | `firmware_urls`    | _(empty)_                | Per-model firmware download URLs                                         |
 | `firmware_server`  | _(empty)_                | Firmware server API base URL (see below)                                 |
+| `dns_servers`      | _(empty)_                | DNS servers offered as the default in the bulk settings push             |
 | `default_username` | _(empty)_                | Pre-filled username for SSH connection prompts                           |
 | `ssh_key_auth`     | `true`                   | Try SSH key auth (agent + key files) before prompting for password       |
 
@@ -199,6 +201,41 @@ devices:
 - `username`, `password`, `profile` are optional — devices without them use shared credentials/profile prompted at runtime
 - Supports both provision and dry-run modes
 - Runs all devices in parallel with live progress display
+
+### Bulk Common Settings
+
+**Discover Devices → Apply Common Settings** pushes the settings that are the
+same across an estate to every selected device in one pass. It never prompts
+for — or sends — IP address, subnet mask, gateway or hostname, so there is no
+per-device confirmation to click through.
+
+Available settings: DNS servers, NTP server, timezone, date/time sync, web and
+secure web ports, user and console login attempts, user and console lockout
+times, FIPS mode. Nothing is pre-selected; tick only what you want to push, and
+each value is prompted with your configured default pre-filled.
+
+DNS servers can be **replaced** or **appended**:
+
+- **Replace** reads the device's current servers from `IPCONFIG /ALL` and issues
+  the minimum `REMDNS`/`ADDDNS` pair needed to reach the list you gave. Servers
+  already correct are left alone, so re-running the same list sends nothing.
+- **Append** only adds, leaving anything already configured in place.
+
+Set `dns_servers` in the config file to have your list pre-filled:
+
+```yaml
+dns_servers:
+  - 10.0.0.1
+  - 10.0.0.2
+```
+
+A **dry run** prints the exact commands per device without sending any, and also
+shows the DNS servers it detected — worth doing once on a new model to confirm
+the `IPCONFIG` output was read correctly.
+
+Two caveats: FIPS mode only takes effect after a reboot, and this flow never
+reboots. And on a device using DHCP, DHCP-supplied DNS may override what you
+push here.
 
 ### Certificate Management
 
