@@ -62,7 +62,6 @@ The Crestron CLI is **not** a standard shell — it uses a custom `MODEL>` promp
 - `ADDDNS` in the provisioning flow only runs in the **static IP** branch (`provisioning.py`), which is why bulk DNS pushes go through `apply_common_settings()` instead.
 - `parse_dns_servers()` tolerates several `IPCONFIG /ALL` layouts because the wording varies by model/firmware; it returns `[]` on an unrecognised layout rather than guessing. The bulk flow's dry run prints what it detected, so a new model can be confirmed before applying.
 - An empty DNS entry in the bulk flow means "leave DNS alone", never "remove every server".
-
 - First-boot detection is staged and bounded (see `CrestronFirstBoot.check_first_boot`): TCP probe :443 → HTTPS check for `/createUser.html` redirect → TCP probe :22 → SSH as `crestron` with empty password. `_check_first_boot_https` is **tri-state**: True = first boot, False = definitively provisioned (skip SSH), None = inconclusive (try SSH). If the `Username:` prompt appears over SSH, it's first boot; if a `MODEL>` prompt appears, it's already configured.
 - Never check first-boot state in a serial loop over discovered devices — use `CrestronFirstBoot.check_first_boot_batch` (or `cli._check_first_boot_states`), which fans out across a thread pool with a per-device time budget.
 
