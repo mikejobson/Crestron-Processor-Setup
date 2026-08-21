@@ -80,6 +80,12 @@ firmware_urls:
 #
 # firmware_server: "https://example.com/api/firmware/public"
 
+# DNS servers pushed by "Apply Common Settings" (bulk DNS/NTP/timezone push).
+# Also used as the default when that flow prompts for DNS servers.
+# dns_servers:
+#   - 10.0.0.1
+#   - 10.0.0.2
+
 # Discovery settings
 discovery:
   timeout: 5 # Seconds to listen for responses

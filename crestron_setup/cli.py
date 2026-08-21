@@ -30,7 +30,7 @@ from rich.text import Text
 from .config import load_config, save_config
 from .discovery import discover_devices, print_device_table
 from .firmware import cache_info, clear_cache, download_firmware, download_firmware_quiet, find_local_firmware
-from .models import Config, Device, NetworkConfig, Profile, SKIP, resolve_profile
+from .models import CommonSettings, Config, Device, NetworkConfig, Profile, SKIP, resolve_profile
 from .provisioning import (
     DeviceResult,
     _ParallelDisplay,
@@ -473,6 +473,8 @@ def _flow_discover(config: Config) -> Config:
         choices=[
             questionary.Choice("Provision", value="provision"),
             questionary.Choice("Provision (Dry Run)", value="dry_run"),
+            questionary.Choice("Apply Common Settings (DNS/NTP/timezone…)",
+                               value="apply_settings"),
             questionary.Choice("Deploy Certificate", value="deploy_cert"),
             questionary.Choice("IP Table", value="iptable"),
             questionary.Choice("Account Management", value="accounts"),
@@ -629,6 +631,14 @@ def _flow_discover(config: Config) -> Config:
             console.print("[dim]Cancelled.[/dim]")
             _pause()
             return config
+
+    # ── Bulk settings push: handled separately ──────────────────────────
+    if action == "apply_settings":
+        config = _flow_bulk_apply_settings(
+            selected_devices, username, password, config,
+        )
+        _pause()
+        return config
 
     # ── Deploy certificate: handled separately ──────────────────────────
     if action == "deploy_cert":
@@ -2403,6 +2413,269 @@ def _flow_tls_settings(config: Config) -> None:
         console.print(f"[red][FAIL][/red] Connection failed: {e}")
 
     _pause()
+
+
+def _flow_bulk_apply_settings(
+    devices: list[Device],
+    username: str,
+    password: str,
+    config: Config,
+) -> Config:
+    """Push a chosen subset of shared settings to many devices at once.
+
+    Deliberately never prompts for — or sends — IP address, subnet mask,
+    gateway or hostname: those are per-device identity and belong to the
+    provisioning flow.  This is for the settings that are the same estate
+    wide (DNS, NTP, timezone, ports, lockout policy, FIPS).
+    """
+    from .provisioning import apply_common_settings
+
+    _header("Apply Common Settings")
+    console.print(
+        f"[cyan]{len(devices)}[/cyan] device(s) selected. "
+        "IP settings are not touched.\n"
+    )
+
+    # Which settings to push. Nothing is pre-selected — an accidental Enter
+    # must not push an estate-wide change.
+    field_choices = [
+        questionary.Choice(f"Timezone           (currently configured: "
+                           f"{config.timezone} — {timezone_label(config.timezone)})",
+                           value="timezone"),
+        questionary.Choice(f"NTP server         ({config.ntp_server})",
+                           value="ntp_server"),
+        questionary.Choice("Sync date/time now", value="sync_time"),
+        questionary.Choice(f"DNS servers        ({', '.join(config.dns_servers) or 'not set'})",
+                           value="dns_servers"),
+        questionary.Choice(f"Web port           ({config.web_port})",
+                           value="web_port"),
+        questionary.Choice(f"Secure web port    ({config.secure_web_port})",
+                           value="secure_web_port"),
+        questionary.Choice(f"User login attempts({config.user_login_attempts})",
+                           value="user_login_attempts"),
+        questionary.Choice(f"User lockout time  ({config.user_lockout_time})",
+                           value="user_lockout_time"),
+        questionary.Choice(f"Console login attempts ({config.login_attempts})",
+                           value="login_attempts"),
+        questionary.Choice(f"Console lockout time   ({config.lockout_time})",
+                           value="lockout_time"),
+        questionary.Choice(f"FIPS mode          ({config.fips_mode})",
+                           value="fips_mode"),
+    ]
+    chosen = questionary.checkbox(
+        "Select the settings to push:", choices=field_choices,
+    ).ask()
+    if not chosen:
+        console.print("[dim]Nothing selected.[/dim]")
+        return config
+
+    settings = CommonSettings()
+
+    if "timezone" in chosen:
+        tz = questionary.select(
+            "Timezone (type to filter):",
+            choices=[questionary.Choice(lbl, value=tid)
+                     for tid, lbl in timezone_choices()],
+            default=config.timezone.zfill(3),
+        ).ask()
+        if tz is None:
+            return config
+        settings.timezone = tz
+
+    if "ntp_server" in chosen:
+        ntp = questionary.text("NTP server:", default=config.ntp_server).ask()
+        if not ntp:
+            return config
+        settings.ntp_server = ntp.strip()
+
+    settings.sync_time = "sync_time" in chosen
+
+    if "dns_servers" in chosen:
+        dns_input = questionary.text(
+            "DNS servers (comma-separated):",
+            default=", ".join(config.dns_servers),
+        ).ask()
+        entries = [d.strip() for d in (dns_input or "").split(",") if d.strip()]
+        if not entries:
+            # Blank must not be read as "remove every DNS server".
+            console.print("[yellow][WARN][/yellow] No DNS servers given — "
+                          "leaving DNS untouched.")
+        else:
+            invalid = [d for d in entries if not _is_ipv4(d)]
+            if invalid:
+                console.print(f"[red][FAIL][/red] Not valid IPv4: "
+                              f"{', '.join(invalid)}")
+                return config
+            settings.dns_servers = entries
+            settings.dns_mode = questionary.select(
+                "How should existing DNS servers be handled?",
+                choices=[
+                    questionary.Choice(
+                        "Replace — remove any server not in this list",
+                        value="replace"),
+                    questionary.Choice(
+                        "Append — keep existing servers as well",
+                        value="append"),
+                ],
+            ).ask() or "replace"
+
+    # Numeric and free-text settings, defaulted from config
+    for key, prompt, caster in (
+        ("web_port", "Web port", int),
+        ("secure_web_port", "Secure web port", int),
+        ("user_login_attempts", "User login attempts", int),
+        ("user_lockout_time", "User lockout time", str),
+        ("login_attempts", "Console login attempts", int),
+        ("lockout_time", "Console lockout time", str),
+    ):
+        if key not in chosen:
+            continue
+        raw = questionary.text(f"{prompt}:", default=str(getattr(config, key))).ask()
+        if not raw:
+            return config
+        try:
+            setattr(settings, key, caster(raw.strip()))
+        except ValueError:
+            console.print(f"[red][FAIL][/red] {prompt} must be a number.")
+            return config
+
+    if "fips_mode" in chosen:
+        fips = questionary.select(
+            "FIPS mode:",
+            choices=[questionary.Choice("OFF", value="OFF"),
+                     questionary.Choice("ON", value="ON")],
+            default=config.fips_mode if config.fips_mode in ("ON", "OFF") else "OFF",
+        ).ask()
+        if fips is None:
+            return config
+        settings.fips_mode = fips
+
+    if settings.is_empty:
+        console.print("[dim]Nothing to apply.[/dim]")
+        return config
+
+    # Confirmation: show exactly what will be sent
+    summary = Table(title="Settings to Push", border_style="cyan")
+    summary.add_column("Setting", style="cyan", min_width=22)
+    summary.add_column("Value", min_width=20)
+    for label, value in _describe_common_settings(settings):
+        summary.add_row(label, value)
+    console.print(summary)
+    console.print(
+        f"\n[dim]Target: {len(devices)} device(s). "
+        "IP address, mask, gateway and hostname are not modified.[/dim]"
+    )
+    if settings.needs_reboot:
+        console.print("[yellow][WARN][/yellow] FIPS mode only takes effect "
+                      "after a reboot — this flow does not reboot.")
+    console.print()
+
+    mode = questionary.select(
+        "Run mode:",
+        choices=[
+            questionary.Choice("Apply to devices", value="apply"),
+            questionary.Choice("Dry run (show commands, change nothing)",
+                               value="dry_run"),
+            questionary.Choice("Cancel", value="cancel"),
+        ],
+    ).ask()
+    if mode is None or mode == "cancel":
+        console.print("[dim]Cancelled.[/dim]")
+        return config
+
+    dry_run = mode == "dry_run"
+
+    # Remember the DNS list for next time
+    if settings.dns_servers and settings.dns_servers != config.dns_servers:
+        config.dns_servers = list(settings.dns_servers)
+        save_config(config)
+
+    workers = max(1, min(len(devices), config.discovery_probe_workers))
+    results = []
+    label = "Previewing…" if dry_run else "Applying settings…"
+    with console.status(label, spinner="dots"):
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [
+                pool.submit(apply_common_settings, dev, username, password,
+                            settings, config, dry_run)
+                for dev in devices
+            ]
+            results = [f.result() for f in futures]
+
+    title = "Dry Run — Commands That Would Be Sent" if dry_run else "Settings Push Results"
+    table = Table(title=title, border_style="cyan")
+    table.add_column("Device", style="cyan", min_width=16)
+    table.add_column("Result", min_width=10)
+    table.add_column("Detail", min_width=30)
+    for r in results:
+        status = "[green]✓ OK[/green]" if r.success else "[red]✗ Failed[/red]"
+        table.add_row(r.host, status, r.detail)
+    console.print(table)
+
+    failed = [r for r in results if not r.success]
+    console.print()
+    console.print(
+        f"[green]{len(results) - len(failed)} succeeded[/green]"
+        + (f", [red]{len(failed)} failed[/red]" if failed else "")
+    )
+
+    # On a dry run, show the actual commands — this is also how you confirm
+    # the DNS reconciliation read the device correctly.
+    if dry_run:
+        for r in results:
+            if not r.commands:
+                continue
+            console.print(f"\n[bold]{r.host}[/bold]"
+                          + (f"  [dim]current DNS: "
+                             f"{', '.join(r.current_dns) or 'none detected'}[/dim]"
+                             if settings.dns_servers else ""))
+            for cmd in r.commands:
+                console.print(f"  [yellow]→[/yellow] {cmd}")
+
+    return config
+
+
+def _describe_common_settings(settings: CommonSettings) -> list[tuple[str, str]]:
+    """Render a CommonSettings bundle as (label, value) rows for display."""
+    rows: list[tuple[str, str]] = []
+    if settings.timezone is not None:
+        rows.append(("Timezone",
+                     f"{settings.timezone} — {timezone_label(settings.timezone)}"))
+    if settings.ntp_server is not None:
+        rows.append(("NTP server", settings.ntp_server))
+    if settings.sync_time:
+        rows.append(("Date/time", "sync to this computer's clock"))
+    if settings.dns_servers is not None:
+        rows.append((f"DNS servers ({settings.dns_mode})",
+                     ", ".join(settings.dns_servers)))
+    if settings.web_port is not None:
+        rows.append(("Web port", str(settings.web_port)))
+    if settings.secure_web_port is not None:
+        rows.append(("Secure web port", str(settings.secure_web_port)))
+    if settings.user_login_attempts is not None:
+        rows.append(("User login attempts", str(settings.user_login_attempts)))
+    if settings.user_lockout_time is not None:
+        rows.append(("User lockout time", settings.user_lockout_time))
+    if settings.login_attempts is not None:
+        rows.append(("Console login attempts", str(settings.login_attempts)))
+    if settings.lockout_time is not None:
+        rows.append(("Console lockout time", settings.lockout_time))
+    if settings.fips_mode is not None:
+        rows.append(("FIPS mode", settings.fips_mode))
+    return rows
+
+
+def _is_ipv4(value: str) -> bool:
+    """True when value is a dot-decimal IPv4 address."""
+    parts = value.split(".")
+    if len(parts) != 4:
+        return False
+    for part in parts:
+        if not part.isdigit() or not 0 <= int(part) <= 255:
+            return False
+        if len(part) > 1 and part[0] == "0":
+            return False
+    return True
 
 
 def _flow_bulk_deploy_cert(
