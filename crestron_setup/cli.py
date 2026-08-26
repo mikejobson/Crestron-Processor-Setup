@@ -40,6 +40,10 @@ from .provisioning import (
     restore_device,
     upload_program,
 )
+import httpx
+
+from .nvx import NvxApiError, NvxClient
+from .nvx_models import NvxDeviceStatus
 from .ssh import CrestronFirstBoot
 
 if TYPE_CHECKING:
@@ -330,6 +334,7 @@ def main() -> None:
             questionary.Choice("Certificate Management", value="certs"),
             questionary.Choice("IP Table Management", value="iptable"),
             questionary.Choice("Account Management", value="accounts"),
+            questionary.Choice("NVX Device Management", value="nvx"),
             questionary.Choice("Restore & Erase Device", value="restore"),
             questionary.Choice("Download Firmware", value="firmware"),
             questionary.Choice("Clear Firmware Cache", value="cache"),
@@ -368,6 +373,8 @@ def main() -> None:
             config = _flow_ip_table(config)
         elif choice == "accounts":
             config = _flow_account_mgmt(config)
+        elif choice == "nvx":
+            _flow_nvx_management(config)
         elif choice == "firmware":
             _flow_firmware(config)
         elif choice == "cache":
@@ -478,6 +485,7 @@ def _flow_discover(config: Config) -> Config:
             questionary.Choice("Deploy Certificate", value="deploy_cert"),
             questionary.Choice("IP Table", value="iptable"),
             questionary.Choice("Account Management", value="accounts"),
+            questionary.Choice("NVX Device Management", value="nvx"),
             questionary.Choice("Upload Program", value="program"),
             questionary.Choice("Deploy Project (UC Engine)", value="project"),
             questionary.Choice("Restore & Erase", value="restore"),
@@ -498,7 +506,7 @@ def _flow_discover(config: Config) -> Config:
         for i, dev in enumerate(devices)
     ]
 
-    if action in ("iptable", "accounts"):
+    if action in ("iptable", "accounts", "nvx"):
         selected_idx = questionary.select(
             "Select device:",
             choices=device_choices,
@@ -720,6 +728,10 @@ def _flow_discover(config: Config) -> Config:
         elif action == "accounts":
             _flow_account_mgmt(config, host=dev.ip or dev.hostname,
                                username=username, password=password)
+            return config
+        elif action == "nvx":
+            _flow_nvx_management(config, host=dev.ip or dev.hostname,
+                                 username=username, password=password)
             return config
         _pause()
         return config
@@ -4195,3 +4207,472 @@ def _prompt_network_config(device_label: str = "") -> NetworkConfig | None:
         gateway=gw,
         dns_servers=dns_servers,
     )
+
+
+# --------------------------------------------------------------------------- #
+#  NVX Device Management flow
+# --------------------------------------------------------------------------- #
+
+
+def _nvx_connect(
+    host: str, username: str, password: str,
+) -> NvxClient | None:
+    """Create an NVX API client and authenticate."""
+    try:
+        client = NvxClient(host)
+        client.login(username, password)
+        return client
+    except (NvxApiError, httpx.HTTPError, OSError) as e:
+        console.print(f"[red][FAIL][/red] Could not connect to {host}: {e}")
+        return None
+
+
+def _nvx_show_status(client: NvxClient) -> None:
+    """Retrieve and display full NVX device status."""
+    try:
+        status = client.get_status()
+    except NvxApiError as e:
+        console.print(f"[red][FAIL][/red] {e}")
+        return
+
+    info = status.info
+
+    # Device info table
+    table = Table(title="NVX Device Info", border_style="cyan")
+    table.add_column("Property", style="bold")
+    table.add_column("Value")
+    table.add_row("IP Address", info.ip)
+    table.add_row("Hostname", info.hostname or "—")
+    table.add_row("Model", info.model or "—")
+    table.add_row("Serial Number", info.serial_number or "—")
+    table.add_row("Firmware", info.firmware_version or "—")
+    table.add_row("MAC Address", info.mac_address or "—")
+    table.add_row("Device Mode", info.device_mode or "—")
+    table.add_row("Device Ready", "Yes" if info.device_ready else "No")
+    table.add_row("Audio Mode", status.audio_mode or "—")
+    table.add_row("Audio Source", status.audio_source or "—")
+    table.add_row("Video Source", status.video_source or "—")
+    table.add_row("LEDs Enabled", "Yes" if status.leds_enabled else "No")
+    console.print(table)
+    console.print()
+
+    # Streams table
+    if status.streams:
+        st = Table(title="Streams", border_style="green")
+        st.add_column("#", style="dim", width=3)
+        st.add_column("Multicast Address", style="cyan")
+        st.add_column("Status", style="yellow")
+        st.add_column("Bitrate", style="magenta")
+        st.add_column("Initiation")
+        st.add_column("Location", style="dim")
+        for i, stream in enumerate(status.streams):
+            st.add_row(
+                str(i),
+                stream.multicast_address or "—",
+                stream.status or "—",
+                str(stream.bitrate) if stream.bitrate else "—",
+                stream.session_initiation or "—",
+                stream.stream_location or "—",
+            )
+        console.print(st)
+    else:
+        console.print("[dim]No stream information available.[/dim]")
+    console.print()
+
+    # USB ports table
+    if status.usb_ports:
+        ut = Table(title="USB Ports", border_style="yellow")
+        ut.add_column("#", style="dim", width=3)
+        ut.add_column("Name")
+        ut.add_column("Mode", style="cyan")
+        ut.add_column("Paired", style="green")
+        ut.add_column("Active", style="yellow")
+        ut.add_column("Transport")
+        ut.add_column("UUID", style="dim")
+        for port in status.usb_ports:
+            ut.add_row(
+                str(port.index),
+                port.name or "—",
+                port.mode or "—",
+                "Yes" if port.paired else "No",
+                "Yes" if port.is_active else "No",
+                port.transport_mode or "—",
+                port.uuid or "—",
+            )
+        console.print(ut)
+    else:
+        console.print("[dim]No USB port information available.[/dim]")
+
+
+def _nvx_set_device_mode(client: NvxClient) -> None:
+    """Set NVX device mode (Transmitter / Receiver)."""
+    try:
+        current = client.get_device_mode()
+    except NvxApiError:
+        current = "Unknown"
+
+    console.print(f"[cyan][INFO][/cyan] Current mode: [bold]{current}[/bold]")
+    mode = questionary.select(
+        "Set device mode:",
+        choices=[
+            questionary.Choice("Transmitter", value="Transmitter"),
+            questionary.Choice("Receiver", value="Receiver"),
+            questionary.Choice("Cancel", value=None),
+        ],
+    ).ask()
+    if not mode:
+        return
+
+    try:
+        client.set_device_mode(mode)
+        console.print(f"[green][OK][/green] Device mode set to {mode}")
+    except NvxApiError as e:
+        console.print(f"[red][FAIL][/red] {e}")
+
+
+def _nvx_multicast(client: NvxClient) -> None:
+    """Manage multicast addresses on an NVX device."""
+    try:
+        mode = client.get_device_mode()
+    except NvxApiError:
+        mode = "Unknown"
+
+    # Show current streams
+    try:
+        if mode == "Transmitter":
+            streams = client.get_transmit_streams()
+            direction = "transmit"
+        else:
+            streams = client.get_receive_streams()
+            direction = "receive"
+    except NvxApiError as e:
+        console.print(f"[red][FAIL][/red] {e}")
+        return
+
+    if streams:
+        for i, s in enumerate(streams):
+            console.print(
+                f"  Stream {i}: [cyan]{s.multicast_address or 'not set'}[/cyan] "
+                f"({s.status or 'unknown'})"
+            )
+    else:
+        console.print("[dim]No streams configured.[/dim]")
+
+    console.print()
+    address = questionary.text(
+        "New multicast address (e.g. 239.x.x.x, blank to cancel):",
+    ).ask()
+    if not address:
+        return
+
+    stream_idx = 0
+    if streams and len(streams) > 1:
+        idx_input = questionary.text("Stream index:", default="0").ask()
+        try:
+            stream_idx = int(idx_input or "0")
+        except ValueError:
+            stream_idx = 0
+
+    try:
+        client.set_multicast_address(
+            address, stream_index=stream_idx, direction=direction,
+        )
+        console.print(
+            f"[green][OK][/green] Multicast address set to {address} "
+            f"(stream {stream_idx})"
+        )
+    except NvxApiError as e:
+        console.print(f"[red][FAIL][/red] {e}")
+
+
+def _nvx_usb_management(client: NvxClient) -> None:
+    """USB management submenu for an NVX device."""
+    while True:
+        # Show current USB ports
+        try:
+            ports = client.get_usb_ports()
+        except NvxApiError as e:
+            console.print(f"[red][FAIL][/red] {e}")
+            return
+
+        if ports:
+            for p in ports:
+                console.print(
+                    f"  Port {p.index}: mode=[cyan]{p.mode or '?'}[/cyan] "
+                    f"paired={'Yes' if p.paired else 'No'} "
+                    f"transport={p.transport_mode or '?'} "
+                    f"uuid=[dim]{p.uuid or '?'}[/dim]"
+                )
+        else:
+            console.print("[dim]No USB ports found.[/dim]")
+
+        console.print()
+        action = questionary.select(
+            "USB Management:",
+            choices=[
+                questionary.Choice("Set USB Mode (Local/Remote)", value="mode"),
+                questionary.Choice("Set USB Transport (Layer 2/3)", value="transport"),
+                questionary.Choice("Pair USB Port", value="pair"),
+                questionary.Choice("Unpair USB Port", value="unpair"),
+                questionary.Choice("Back", value="back"),
+            ],
+        ).ask()
+
+        if action is None or action == "back":
+            return
+
+        port_idx = 0
+        if ports and len(ports) > 1:
+            idx_input = questionary.text("Port index:", default="0").ask()
+            try:
+                port_idx = int(idx_input or "0")
+            except ValueError:
+                port_idx = 0
+
+        try:
+            if action == "mode":
+                mode = questionary.select(
+                    "USB mode:",
+                    choices=["Local", "Remote"],
+                ).ask()
+                if mode:
+                    client.set_usb_mode(mode, port_index=port_idx)
+                    console.print(f"[green][OK][/green] USB mode set to {mode}")
+
+            elif action == "transport":
+                transport = questionary.select(
+                    "USB transport:",
+                    choices=["Layer2", "Layer3"],
+                ).ask()
+                if transport:
+                    client.set_usb_transport(transport, port_index=port_idx)
+                    console.print(
+                        f"[green][OK][/green] USB transport set to {transport}"
+                    )
+
+            elif action == "pair":
+                remote_id = questionary.text(
+                    "Remote device UUID to pair with:"
+                ).ask()
+                if remote_id:
+                    client.pair_usb(remote_id, port_index=port_idx)
+                    console.print(f"[green][OK][/green] USB paired with {remote_id}")
+
+            elif action == "unpair":
+                confirm = questionary.confirm(
+                    f"Unpair USB port {port_idx}?", default=False,
+                ).ask()
+                if confirm:
+                    client.unpair_usb(port_index=port_idx)
+                    console.print("[green][OK][/green] USB port unpaired")
+
+        except NvxApiError as e:
+            console.print(f"[red][FAIL][/red] {e}")
+
+        _pause()
+
+
+def _nvx_batch_operation(config: Config) -> None:
+    """Apply a setting to multiple NVX devices at once."""
+    _header("NVX Batch Operation")
+
+    # Get list of IPs
+    ip_input = questionary.text(
+        "Enter NVX device IPs (comma-separated):",
+    ).ask()
+    if not ip_input:
+        return
+
+    hosts = [h.strip() for h in ip_input.split(",") if h.strip()]
+    if not hosts:
+        return
+
+    username = questionary.text("Username:", default="admin").ask()
+    if not username:
+        return
+    password = questionary.password("Password:").ask()
+    if not password:
+        return
+
+    action = questionary.select(
+        "Batch action:",
+        choices=[
+            questionary.Choice("Set Device Mode", value="mode"),
+            questionary.Choice("Set Multicast Address", value="multicast"),
+            questionary.Choice("Set USB Mode", value="usb_mode"),
+            questionary.Choice("Set USB Transport", value="usb_transport"),
+            questionary.Choice("View All Status", value="status"),
+            questionary.Choice("Cancel", value=None),
+        ],
+    ).ask()
+    if not action:
+        return
+
+    # Collect parameters for the batch action
+    mode_val = ""
+    multicast_addr = ""
+    direction = "transmit"
+    usb_mode = ""
+    usb_transport = ""
+
+    if action == "mode":
+        mode_val = questionary.select(
+            "Device mode:", choices=["Transmitter", "Receiver"],
+        ).ask() or ""
+        if not mode_val:
+            return
+    elif action == "multicast":
+        multicast_addr = questionary.text(
+            "Multicast address (e.g. 239.x.x.x):",
+        ).ask() or ""
+        if not multicast_addr:
+            return
+        direction = questionary.select(
+            "Stream direction:", choices=["transmit", "receive"],
+        ).ask() or "transmit"
+    elif action == "usb_mode":
+        usb_mode = questionary.select(
+            "USB mode:", choices=["Local", "Remote"],
+        ).ask() or ""
+        if not usb_mode:
+            return
+    elif action == "usb_transport":
+        usb_transport = questionary.select(
+            "USB transport:", choices=["Layer2", "Layer3"],
+        ).ask() or ""
+        if not usb_transport:
+            return
+
+    # Execute on each device
+    for host in hosts:
+        console.print(f"\n[bold]── {host} ──[/bold]")
+        client = _nvx_connect(host, username, password)
+        if not client:
+            continue
+
+        try:
+            if action == "status":
+                _nvx_show_status(client)
+            elif action == "mode":
+                client.set_device_mode(mode_val)
+                console.print(
+                    f"[green][OK][/green] Device mode set to {mode_val}"
+                )
+            elif action == "multicast":
+                client.set_multicast_address(
+                    multicast_addr, direction=direction,
+                )
+                console.print(
+                    f"[green][OK][/green] Multicast address set to "
+                    f"{multicast_addr}"
+                )
+            elif action == "usb_mode":
+                client.set_usb_mode(usb_mode)
+                console.print(
+                    f"[green][OK][/green] USB mode set to {usb_mode}"
+                )
+            elif action == "usb_transport":
+                client.set_usb_transport(usb_transport)
+                console.print(
+                    f"[green][OK][/green] USB transport set to {usb_transport}"
+                )
+        except NvxApiError as e:
+            console.print(f"[red][FAIL][/red] {e}")
+        finally:
+            client.close()
+
+
+def _flow_nvx_management(
+    config: Config,
+    host: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+) -> None:
+    """NVX Device Management submenu."""
+    _header("NVX Device Management")
+
+    choice = questionary.select(
+        "NVX Management:",
+        choices=[
+            questionary.Choice("Manage Single Device", value="single"),
+            questionary.Choice("Batch Operation (Multiple Devices)", value="batch"),
+            questionary.Choice("Back", value="back"),
+        ],
+    ).ask()
+
+    if choice is None or choice == "back":
+        return
+
+    if choice == "batch":
+        _nvx_batch_operation(config)
+        _pause()
+        return
+
+    # Single device management
+    if not host:
+        host = questionary.text("NVX device hostname or IP:").ask()
+        if not host:
+            return
+
+    if username is None or password is None:
+        username_input = questionary.text(
+            "Username:", default="admin",
+        ).ask()
+        if not username_input:
+            return
+        password_input = questionary.password("Password:").ask()
+        if not password_input:
+            return
+        username = username_input
+        password = password_input
+
+    client = _nvx_connect(host, username, password)
+    if not client:
+        _pause()
+        return
+
+    try:
+        while True:
+            _header(f"NVX — {host}")
+            action = questionary.select(
+                f"NVX — {host}",
+                choices=[
+                    questionary.Choice("View Device Status", value="status"),
+                    questionary.Choice("Set Device Mode (TX/RX)", value="mode"),
+                    questionary.Choice("Multicast Address", value="multicast"),
+                    questionary.Choice("USB Management", value="usb"),
+                    questionary.Choice("Reboot Device", value="reboot"),
+                    questionary.Choice("Back", value="back"),
+                ],
+            ).ask()
+
+            if action is None or action == "back":
+                break
+
+            try:
+                if action == "status":
+                    _nvx_show_status(client)
+                elif action == "mode":
+                    _nvx_set_device_mode(client)
+                elif action == "multicast":
+                    _nvx_multicast(client)
+                elif action == "usb":
+                    _nvx_usb_management(client)
+                elif action == "reboot":
+                    confirm = questionary.confirm(
+                        f"Reboot {host}?", default=False,
+                    ).ask()
+                    if confirm:
+                        try:
+                            client.reboot()
+                            console.print(
+                                "[green][OK][/green] Reboot command sent"
+                            )
+                        except NvxApiError as e:
+                            console.print(f"[red][FAIL][/red] {e}")
+            except NvxApiError as e:
+                console.print(f"[red][FAIL][/red] {e}")
+
+            _pause()
+    finally:
+        client.close()
